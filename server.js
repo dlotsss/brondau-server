@@ -14,6 +14,33 @@ webpush.setVapidDetails(
   process.env.VAPID_PRIVATE_KEY
 );
 
+// Хелпер для форматирования даты в локальное время для уведомлений
+function formatBookingDate(isoDateString, offsetMinutes) {
+  const date = new Date(isoDateString);
+  
+  // Если смещение передано (от клиента), используем его
+  if (offsetMinutes !== undefined && offsetMinutes !== null) {
+    // Вычитаем смещение (offset в минутах), чтобы получить локальное время
+    // getTimezoneOffset возвращает разницу: UTC - Local (для UTC+5 это -300)
+    // Поэтому: 13:30 UTC - (-300 мин) = 13:30 + 5ч = 18:30
+    const localTime = new Date(date.getTime() - (offsetMinutes * 60 * 1000));
+    
+    // Форматируем как UTC, так как мы уже вручную сдвинули время на нужные часы
+    return localTime.toLocaleString('ru-RU', {
+      timeZone: 'UTC',
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+    });
+  }
+  
+  // Если смещения нет (например, при подтверждении брони админом),
+  // используем дефолтный часовой пояс (например, Asia/Almaty для Казахстана)
+  // или системное время, если зона не указана.
+  return date.toLocaleString('ru-RU', {
+    timeZone: process.env.TZ || 'Asia/Almaty', // Установите нужную зону или по умолчанию KZ
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+  });
+}
+
 async function sendPushToSubscriptions(subscriptions, payload) {
   const payloadStr = JSON.stringify(payload);
   for (const sub of subscriptions) {
@@ -321,6 +348,7 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
 
     const bookingDate = new Date(dateTime);
     const validationDate = new Date(bookingDate);
+    // Для валидации также используем offset, чтобы проверить "локальное" время
     if (timezoneOffset !== undefined) {
       validationDate.setMinutes(validationDate.getMinutes() - timezoneOffset);
     }
@@ -381,13 +409,7 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
       return res.status(409).json({ error: 'A booking for this phone number already exists' });
     }
 
-    // --- УДАЛЕНА ПРОВЕРКА "Rest of Day", КОТОРАЯ БЛОКИРОВАЛА СТОЛ НА ВЕСЬ ДЕНЬ ---
-
     // 4. Overlap Check (Forward looking / Vicinity)
-    // Проверка на пересечение: новая бронь не должна быть ближе чем 1 час к существующей
-    // Пример: Если есть бронь на 19:00.
-    // Запрос на 18:00: (18:00 > 18:00) && (18:00 < 20:00). Первое условие FALSE (равно). Разрешено.
-    // Запрос на 18:01: (18:01 > 18:00) && (18:01 < 20:00). TRUE. Запрещено.
     const doubleBookingResult = await pool.query(
       `SELECT id
        FROM bookings
@@ -417,7 +439,9 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
         [restaurantId]
       );
       if (adminSubs.rows.length > 0) {
-        const bookingTime = new Date(dateTime).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        // !!! ФИКС ВРЕМЕНИ !!! Используем timezoneOffset от клиента
+        const bookingTime = formatBookingDate(dateTime, timezoneOffset);
+        
         await sendPushToSubscriptions(adminSubs.rows, {
           title: 'Новый запрос на бронирование',
           body: `${guestName} — стол ${tableLabel}, ${bookingTime}, ${guestCount} гостей`,
@@ -457,11 +481,16 @@ app.put('/api/bookings/:id/status', async (req, res) => {
         );
         if (guestSubs.rows.length > 0) {
           let title, body;
+          // !!! ФИКС ВРЕМЕНИ !!! 
+          // Здесь у нас нет offset из запроса (это делает админ), 
+          // поэтому используем дефолт 'Asia/Almaty'
+          const formattedDate = formatBookingDate(booking.date_time, null);
+
           if (status === 'CONFIRMED') {
             const restResult = await pool.query('SELECT name, address FROM restaurants WHERE id = $1', [booking.restaurant_id]);
             const rest = restResult.rows[0];
             title = 'Бронирование подтверждено ✅';
-            body = `${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''} — стол ${booking.table_label}, ${new Date(booking.date_time).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
+            body = `${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''} — стол ${booking.table_label}, ${formattedDate}`;
           } else {
             title = 'Бронирование отклонено ❌';
             body = declineReason || 'Ваше бронирование было отклонено.';
