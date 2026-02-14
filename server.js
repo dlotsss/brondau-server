@@ -387,7 +387,7 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
       return res.status(409).json({ error: 'A booking for this phone number already exists' });
     }
 
-    // 3. "Rest of Day" Block Check:
+    /* 3. "Rest of Day" Block Check:
     // Check for any booking on this table in the SAME SHIFT that is BEFORE or AT the requested time.
     // Effectively, finding a booking at T_exist <= T_new means T_new is blocked.
     const restOfDayBlockResult = await pool.query(
@@ -404,7 +404,7 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
 
     if (restOfDayBlockResult.rows.length > 0) {
       return res.status(409).json({ error: 'This table is already occupied by an earlier booking for the rest of the day.' });
-    }
+    } */
 
     // 4. Overlap Check (Forward looking / Vicinity)
     // We strictly need to prevent cases where new booking starts BEFORE existing one but overlaps.
