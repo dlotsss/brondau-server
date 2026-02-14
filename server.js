@@ -373,9 +373,13 @@ app.put('/api/bookings/:id/status', async (req, res) => {
 
 app.post('/api/bookings/cleanup-expired', async (req, res) => {
   try {
-    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND created_at < NOW() - INTERVAL '3 minutes' RETURNING *`);
+    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND created_at < NOW() - INTERVAL '1 hour' RETURNING *`);
+    
     res.json({ updated: result.rows.length, bookings: result.rows });
-  } catch (error) { console.error('Cleanup error:', error); res.status(500).json({ error: 'Server error' }); }
+  } catch (error) { 
+    console.error('Cleanup error:', error); 
+    res.status(500).json({ error: 'Server error' }); 
+  }
 });
 
 app.post('/api/admins', async (req, res) => {
@@ -397,3 +401,4 @@ app.get('/api/restaurants/:restaurantId/admins', async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+
