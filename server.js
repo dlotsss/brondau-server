@@ -298,7 +298,7 @@ app.get('/api/restaurants/:restaurantId/bookings', async (req, res) => {
 app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
   try {
     const { restaurantId } = req.params;
-    const { tableId, tableLabel, guestName, guestPhone, guestCount, dateTime } = req.body;
+    const { tableId, tableLabel, guestName, guestPhone, guestCount, dateTime, timezoneOffset } = req.body;
 
     const normalizedPhone = String(guestPhone || '').replace(/\D/g, '');
     if (!normalizedPhone) {
@@ -321,53 +321,43 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
     const endStr = work_ends || '23:00';
 
     const bookingDate = new Date(dateTime);
-    const bookingH = bookingDate.getHours();
-    const bookingM = bookingDate.getMinutes();
+    // Adjust for validation: convert UTC bookingDate to the client's local units
+    // if client is +5 (offset -300), we add 300 mins to UTC to get local bits
+    const validationDate = new Date(bookingDate);
+    if (timezoneOffset !== undefined) {
+      validationDate.setMinutes(validationDate.getMinutes() - timezoneOffset);
+    }
 
     const [startH, startM] = startStr.split(':').map(Number);
     const [endH, endM] = endStr.split(':').map(Number);
 
     // Determine Shift Context
-    // If booking time (e.g. 01:00) is earlier than start time (10:00), it *might* belong to previous day's shift (if ends next day).
-    // Logic: calculate ShiftStart relative to bookingDate.
-
-    let shiftStart = new Date(bookingDate);
-    shiftStart.setHours(startH, startM, 0, 0);
-
-    // If booking is 01:00 and start is 10:00, the 'same day' shift start is 10:00 (future).
-    // So this booking must belong to 'yesterday' shift.
-    // BUT we must verify if the restaurant actually operates overnight.
-    // Or if the booking is just invalid (too early).
-
-    // Simplest robust check:
     // Construct candidates for ShiftStart: Same Day, or Previous Day.
-    // See which one contains the bookingDate.
-
     let validShiftStart = null;
     let validShiftEnd = null;
 
-    // Check "Today's" shift (relative to booking date)
-    let s1 = new Date(bookingDate);
-    s1.setHours(startH, startM, 0, 0);
+    // Check "Today's" shift (relative to validation date)
+    let s1 = new Date(validationDate);
+    s1.setUTCHours(startH, startM, 0, 0);
     let e1 = new Date(s1);
-    e1.setHours(endH, endM, 0, 0);
+    e1.setUTCHours(endH, endM, 0, 0);
     if (endH < startH || (endH === startH && endM < startM)) {
-      e1.setDate(e1.getDate() + 1); // Ends next day
+      e1.setUTCDate(e1.getUTCDate() + 1); // Ends next day
     }
 
     // Check "Yesterday's" shift
     let s0 = new Date(s1);
-    s0.setDate(s0.getDate() - 1);
+    s0.setUTCDate(s0.getUTCDate() - 1);
     let e0 = new Date(s0); // Start from s0 base
-    e0.setHours(endH, endM, 0, 0);
+    e0.setUTCHours(endH, endM, 0, 0);
     if (endH < startH || (endH === startH && endM < startM)) {
-      e0.setDate(e0.getDate() + 1);
+      e0.setUTCDate(e0.getUTCDate() + 1);
     }
 
-    if (bookingDate >= s1 && bookingDate < e1) {
+    if (validationDate >= s1 && validationDate < e1) {
       validShiftStart = s1;
       validShiftEnd = e1;
-    } else if (bookingDate >= s0 && bookingDate < e0) {
+    } else if (validationDate >= s0 && validationDate < e0) {
       validShiftStart = s0;
       validShiftEnd = e0;
     }
@@ -378,7 +368,7 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
 
     // 1.5 Challenge: Must be at least 1 hour before closing
     const lastPossibleBooking = new Date(validShiftEnd.getTime() - 60 * 60 * 1000);
-    if (bookingDate > lastPossibleBooking) {
+    if (validationDate > lastPossibleBooking) {
       return res.status(400).json({ error: 'The last possible booking time is one hour before closing.' });
     }
 
