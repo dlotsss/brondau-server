@@ -316,13 +316,10 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
     }
 
     const { work_starts, work_ends } = restaurantResult.rows[0];
-    // Default if null (though schema has defaults, good to be safe)
     const startStr = work_starts || '10:00';
     const endStr = work_ends || '23:00';
 
     const bookingDate = new Date(dateTime);
-    // Adjust for validation: convert UTC bookingDate to the client's local units
-    // if client is +5 (offset -300), we add 300 mins to UTC to get local bits
     const validationDate = new Date(bookingDate);
     if (timezoneOffset !== undefined) {
       validationDate.setMinutes(validationDate.getMinutes() - timezoneOffset);
@@ -332,11 +329,9 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
     const [endH, endM] = endStr.split(':').map(Number);
 
     // Determine Shift Context
-    // Construct candidates for ShiftStart: Same Day, or Previous Day.
     let validShiftStart = null;
     let validShiftEnd = null;
 
-    // Check "Today's" shift (relative to validation date)
     let s1 = new Date(validationDate);
     s1.setUTCHours(startH, startM, 0, 0);
     let e1 = new Date(s1);
@@ -345,10 +340,9 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
       e1.setUTCDate(e1.getUTCDate() + 1); // Ends next day
     }
 
-    // Check "Yesterday's" shift
     let s0 = new Date(s1);
     s0.setUTCDate(s0.getUTCDate() - 1);
-    let e0 = new Date(s0); // Start from s0 base
+    let e0 = new Date(s0);
     e0.setUTCHours(endH, endM, 0, 0);
     if (endH < startH || (endH === startH && endM < startM)) {
       e0.setUTCDate(e0.getUTCDate() + 1);
@@ -387,30 +381,13 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
       return res.status(409).json({ error: 'A booking for this phone number already exists' });
     }
 
-    /* 3. "Rest of Day" Block Check:
-    // Check for any booking on this table in the SAME SHIFT that is BEFORE or AT the requested time.
-    // Effectively, finding a booking at T_exist <= T_new means T_new is blocked.
-    const restOfDayBlockResult = await pool.query(
-      `SELECT id
-       FROM bookings
-       WHERE restaurant_id = $1
-         AND table_id = $2
-         AND date_time >= $3
-         AND date_time <= $4
-         AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
-       LIMIT 1`,
-      [restaurantId, tableId, validShiftStart, dateTime]
-    );
-
-    if (restOfDayBlockResult.rows.length > 0) {
-      return res.status(409).json({ error: 'This table is already occupied by an earlier booking for the rest of the day.' });
-    } */
+    // --- УДАЛЕНА ПРОВЕРКА "Rest of Day", КОТОРАЯ БЛОКИРОВАЛА СТОЛ НА ВЕСЬ ДЕНЬ ---
 
     // 4. Overlap Check (Forward looking / Vicinity)
-    // We strictly need to prevent cases where new booking starts BEFORE existing one but overlaps.
-    // E.g. New=18:00. Existing=18:30.
-    // "Rest of Day" check looks for <= 18:00. Finds nothing.
-    // But 18:00 overlaps 18:30 (buffer).
+    // Проверка на пересечение: новая бронь не должна быть ближе чем 1 час к существующей
+    // Пример: Если есть бронь на 19:00.
+    // Запрос на 18:00: (18:00 > 18:00) && (18:00 < 20:00). Первое условие FALSE (равно). Разрешено.
+    // Запрос на 18:01: (18:01 > 18:00) && (18:01 < 20:00). TRUE. Запрещено.
     const doubleBookingResult = await pool.query(
       `SELECT id
        FROM bookings
@@ -481,7 +458,6 @@ app.put('/api/bookings/:id/status', async (req, res) => {
         if (guestSubs.rows.length > 0) {
           let title, body;
           if (status === 'CONFIRMED') {
-            // Fetch restaurant details for the confirmed notification
             const restResult = await pool.query('SELECT name, address FROM restaurants WHERE id = $1', [booking.restaurant_id]);
             const rest = restResult.rows[0];
             title = 'Бронирование подтверждено ✅';
