@@ -229,12 +229,15 @@ app.get('/api/restaurants/:restaurantId/bookings', async (req, res) => {
 app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
   try {
     const { restaurantId } = req.params;
-    const { tableId, tableLabel, guestName, guestPhone, guestCount, dateTime, timezoneOffset } = req.body;
+    // ДОБАВЛЕНО: isAdmin
+    const { tableId, tableLabel, guestName, guestPhone, guestCount, dateTime, timezoneOffset, isAdmin } = req.body;
 
     const normalizedPhone = String(guestPhone || '').replace(/\D/g, '');
-    if (!normalizedPhone) return res.status(400).json({ error: 'Phone number is required' });
 
-    // 1. Fetch Restaurant Work Hours
+    // ДЛЯ АДМИНА: Телефон не обязателен. ДЛЯ ГОСТЯ: Обязателен.
+    if (!isAdmin && !normalizedPhone) return res.status(400).json({ error: 'Phone number is required' });
+
+    // 1. Получаем рабочие часы
     const restaurantResult = await pool.query('SELECT work_starts, work_ends FROM restaurants WHERE id = $1', [restaurantId]);
     if (restaurantResult.rows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
     const { work_starts, work_ends } = restaurantResult.rows[0];
@@ -250,7 +253,7 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
     const [startH, startM] = startStr.split(':').map(Number);
     const [endH, endM] = endStr.split(':').map(Number);
 
-    // Determine Shift Context
+    // Определяем смену
     let validShiftStart = null;
     let validShiftEnd = null;
     let s1 = new Date(validationDate); s1.setUTCHours(startH, startM, 0, 0);
@@ -266,71 +269,57 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
       validShiftStart = s0; validShiftEnd = e0;
     }
 
-    if (!validShiftStart) return res.status(400).json({ error: `Booking time must be within working hours (${startStr} - ${endStr})` });
+    // === ПРОВЕРКИ ВРЕМЕНИ (ТОЛЬКО ДЛЯ ГОСТЕЙ) ===
+    if (!isAdmin) {
+        if (!validShiftStart) return res.status(400).json({ error: `Booking time must be within working hours (${startStr} - ${endStr})` });
 
-    const lastPossibleBooking = new Date(validShiftEnd.getTime() - 60 * 60 * 1000);
-    if (validationDate > lastPossibleBooking) return res.status(400).json({ error: 'The last possible booking time is one hour before closing.' });
+        const lastPossibleBooking = new Date(validShiftEnd.getTime() - 60 * 60 * 1000);
+        if (validationDate > lastPossibleBooking) return res.status(400).json({ error: 'The last possible booking time is one hour before closing.' });
 
-    // 2. Existing Booking Validation (Phone)
-    const existingBookingResult = await pool.query(
-      `SELECT id FROM bookings WHERE restaurant_id = $1 AND regexp_replace(guest_phone, '\\D', '', 'g') = $2 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
-      [restaurantId, normalizedPhone]
-    );
-    if (existingBookingResult.rows.length > 0) return res.status(409).json({ error: 'A booking for this phone number already exists' });
+        const existingBookingResult = await pool.query(
+          `SELECT id FROM bookings WHERE restaurant_id = $1 AND regexp_replace(guest_phone, '\\D', '', 'g') = $2 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
+          [restaurantId, normalizedPhone]
+        );
+        if (existingBookingResult.rows.length > 0) return res.status(409).json({ error: 'A booking for this phone number already exists' });
 
-    // 3. !!! НОВАЯ ПРОВЕРКА: "Rest of Day Block" !!!
-    // Проверяем, есть ли ЛЮБАЯ активная бронь (Pending/Confirmed/Occupied),
-    // которая начинается РАНЬШЕ или В ТО ЖЕ ВРЕМЯ, что и новая бронь, в ту же смену.
-    // Если есть — стол считается занятым до конца дня (пока админ не нажмет Completed/Declined).
-    const restOfDayBlockResult = await pool.query(
-      `SELECT id
-       FROM bookings
-       WHERE restaurant_id = $1
-         AND table_id = $2
-         AND date_time >= $3 -- Начало смены
-         AND date_time <= $4 -- Время новой брони (или раньше)
-         AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') -- Активные статусы (не COMPLETED)
-       LIMIT 1`,
-      [restaurantId, tableId, validShiftStart, dateTime]
-    );
+        const restOfDayBlockResult = await pool.query(
+          `SELECT id FROM bookings WHERE restaurant_id = $1 AND table_id = $2 AND date_time >= $3 AND date_time <= $4 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
+          [restaurantId, tableId, validShiftStart, dateTime]
+        );
+        if (restOfDayBlockResult.rows.length > 0) return res.status(409).json({ error: 'This table is occupied for the rest of the day by an earlier booking.' });
 
-    if (restOfDayBlockResult.rows.length > 0) {
-      return res.status(409).json({ error: 'This table is occupied for the rest of the day by an earlier booking.' });
+        const doubleBookingResult = await pool.query(
+          `SELECT id FROM bookings WHERE restaurant_id = $1 AND table_id = $2 AND date_time > ($3::timestamp - INTERVAL '1 hour') AND date_time < ($3::timestamp + INTERVAL '1 hour') AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
+          [restaurantId, tableId, dateTime]
+        );
+        if (doubleBookingResult.rows.length > 0) return res.status(409).json({ error: 'This table is already booked near the selected time.' });
     }
+    // === КОНЕЦ ПРОВЕРОК ДЛЯ АДМИНА ===
 
-    // 4. Overlap Check (На случай если кто-то пытается забронировать чуть раньше существующей)
-    // Например: Бронь на 19:00 есть. Пытаемся забронировать на 18:30 (буфер).
-    const doubleBookingResult = await pool.query(
-      `SELECT id
-       FROM bookings
-       WHERE restaurant_id = $1
-         AND table_id = $2
-         AND date_time > ($3::timestamp - INTERVAL '1 hour')
-         AND date_time < ($3::timestamp + INTERVAL '1 hour')
-         AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
-       LIMIT 1`,
-      [restaurantId, tableId, dateTime]
-    );
-    if (doubleBookingResult.rows.length > 0) return res.status(409).json({ error: 'This table is already booked near the selected time.' });
+    // Для админа бронь сразу подтверждена
+    const status = isAdmin ? 'CONFIRMED' : 'PENDING';
 
     const result = await pool.query(`
-      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_count, date_time)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_count, date_time, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *
-    `, [restaurantId, tableId, tableLabel, guestName, normalizedPhone, guestCount, dateTime]);
+    `, [restaurantId, tableId, tableLabel, guestName, normalizedPhone, guestCount, dateTime, status]);
 
-    try {
-      const adminSubs = await pool.query(`SELECT endpoint, keys_p256dh, keys_auth FROM push_subscriptions WHERE role = 'ADMIN' AND restaurant_id = $1`, [restaurantId]);
-      if (adminSubs.rows.length > 0) {
-        const bookingTime = formatBookingDate(dateTime, timezoneOffset);
-        await sendPushToSubscriptions(adminSubs.rows, {
-          title: 'Новый запрос на бронирование',
-          body: `${guestName} — стол ${tableLabel}, ${bookingTime}, ${guestCount} гостей`,
-          tag: `booking-${result.rows[0].id}`
-        });
-      }
-    } catch (pushErr) {
-      console.error('Push notification error (admin):', pushErr);
+    // Уведомления отправляем только если это гость
+    if (!isAdmin) {
+        try {
+          const adminSubs = await pool.query(`SELECT endpoint, keys_p256dh, keys_auth FROM push_subscriptions WHERE role = 'ADMIN' AND restaurant_id = $1`, [restaurantId]);
+          if (adminSubs.rows.length > 0) {
+            const bookingTime = formatBookingDate(dateTime, timezoneOffset);
+            await sendPushToSubscriptions(adminSubs.rows, {
+              title: 'Новый запрос на бронирование',
+              body: `${guestName} — стол ${tableLabel}, ${bookingTime}, ${guestCount} гостей`,
+              tag: `booking-${result.rows[0].id}`
+            });
+          }
+        } catch (pushErr) {
+          console.error('Push notification error (admin):', pushErr);
+        }
     }
 
     res.json(result.rows[0]);
@@ -401,4 +390,5 @@ app.get('/api/restaurants/:restaurantId/admins', async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+
 
