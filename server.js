@@ -334,12 +334,12 @@ app.put('/api/bookings/:id/status', async (req, res) => {
       try {
         const formattedDate = formatBookingDate(booking.date_time, null);
         const eTable = escapeHtml(booking.table_label);
+        const restResult = await pool.query('SELECT name, address FROM restaurants WHERE id = $1', [booking.restaurant_id]);
+        const rest = restResult.rows[0];
+        const eName = escapeHtml(rest?.name || '');
+        const eAddr = escapeHtml(rest?.address || '');
 
         if (status === 'CONFIRMED') {
-          const restResult = await pool.query('SELECT name, address FROM restaurants WHERE id = $1', [booking.restaurant_id]);
-          const rest = restResult.rows[0];
-          const eName = escapeHtml(rest?.name || '');
-          const eAddr = escapeHtml(rest?.address || '');
           await sendEmail({
             to: booking.guest_email,
             subject: 'Бронирование подтверждено ✅',
@@ -351,15 +351,19 @@ app.put('/api/bookings/:id/status', async (req, res) => {
             text: `Ваше бронирование подтверждено!\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nСтол: ${booking.table_label}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}`,
           });
         } else {
-          const reason = declineReason || booking.decline_reason || 'Ваше бронирование было отклонено.';
+          const reason = declineReason || booking.decline_reason || '';
+          const isCancelled = reason === 'Отменено администратором';
+          const subjectText = isCancelled ? 'Бронирование отменено ❌' : 'Бронирование отклонено ❌';
+          const headerText = isCancelled ? 'Ваше бронирование отменено' : 'Ваше бронирование отклонено';
           await sendEmail({
             to: booking.guest_email,
-            subject: 'Бронирование отклонено ❌',
-            html: `<h2>Ваше бронирование отклонено</h2>
+            subject: subjectText,
+            html: `<h2>${headerText}</h2>
+<p><b>Ресторан:</b> ${eName}${eAddr ? ', ' + eAddr : ''}</p>
 <p><b>Стол:</b> ${eTable}</p>
 <p><b>Время:</b> ${escapeHtml(formattedDate)}</p>
-<p><b>Причина:</b> ${escapeHtml(reason)}</p>`,
-            text: `Ваше бронирование отклонено\nСтол: ${booking.table_label}\nВремя: ${formattedDate}\nПричина: ${reason}`,
+<p><b>Причина:</b> ${escapeHtml(reason || 'Ваше бронирование было отклонено.')}</p>`,
+            text: `${headerText}\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nСтол: ${booking.table_label}\nВремя: ${formattedDate}\nПричина: ${reason || 'Ваше бронирование было отклонено.'}`,
           });
         }
       } catch (emailErr) { console.error('Email notification error (guest status):', emailErr); }
