@@ -2,22 +2,17 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcrypt';
-import webpush from 'web-push';
+import { Resend } from 'resend';
 
 dotenv.config();
 import pool from './db.js';
 
-// ============ WEB PUSH SETUP ============
-webpush.setVapidDetails(
-  process.env.VAPID_EMAIL,
-  process.env.VAPID_PUBLIC_KEY,
-  process.env.VAPID_PRIVATE_KEY
-);
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Хелпер для форматирования даты в локальное время для уведомлений
+// ============ EMAIL HELPERS ============
+
 function formatBookingDate(isoDateString, offsetMinutes) {
   const date = new Date(isoDateString);
-  
   if (offsetMinutes !== undefined && offsetMinutes !== null) {
     const localTime = new Date(date.getTime() - (offsetMinutes * 60 * 1000));
     return localTime.toLocaleString('ru-RU', {
@@ -25,31 +20,36 @@ function formatBookingDate(isoDateString, offsetMinutes) {
       day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
     });
   }
-  
   return date.toLocaleString('ru-RU', {
     timeZone: process.env.TZ || 'Asia/Almaty',
     day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
   });
 }
 
-async function sendPushToSubscriptions(subscriptions, payload) {
-  const payloadStr = JSON.stringify(payload);
-  for (const sub of subscriptions) {
-    try {
-      await webpush.sendNotification(
-        {
-          endpoint: sub.endpoint,
-          keys: { p256dh: sub.keys_p256dh, auth: sub.keys_auth }
-        },
-        payloadStr
-      );
-    } catch (err) {
-      console.error('Push send error:', err.statusCode || err.message);
-      if (err.statusCode === 410 || err.statusCode === 404) {
-        await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [sub.endpoint]);
-      }
-    }
+async function sendEmail({ to, subject, html, text }) {
+  if (!process.env.RESEND_API_KEY) return console.error('RESEND_API_KEY is missing');
+  if (!process.env.EMAIL_FROM) return console.error('EMAIL_FROM is missing');
+  try {
+    await resend.emails.send({
+      from: process.env.EMAIL_FROM,
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html,
+      text,
+      replyTo: process.env.EMAIL_REPLY_TO || undefined,
+    });
+  } catch (e) {
+    console.error('Resend email error:', e?.message || e);
   }
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 const app = express();
@@ -121,42 +121,7 @@ app.post('/api/auth/admin', async (req, res) => {
   }
 });
 
-// ============ PUSH SUBSCRIPTIONS ============
 
-app.get('/api/push/vapid-public-key', (req, res) => {
-  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
-});
-
-app.post('/api/push/subscribe', async (req, res) => {
-  try {
-    const { subscription, role, restaurantId, guestPhone } = req.body;
-    await pool.query(`
-      INSERT INTO push_subscriptions (endpoint, keys_p256dh, keys_auth, role, restaurant_id, guest_phone)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (endpoint) DO UPDATE SET
-        keys_p256dh = EXCLUDED.keys_p256dh,
-        keys_auth = EXCLUDED.keys_auth,
-        role = EXCLUDED.role,
-        restaurant_id = EXCLUDED.restaurant_id,
-        guest_phone = EXCLUDED.guest_phone
-    `, [subscription.endpoint, subscription.keys.p256dh, subscription.keys.auth, role, restaurantId || null, guestPhone || null]);
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Push subscribe error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.post('/api/push/unsubscribe', async (req, res) => {
-  try {
-    const { endpoint } = req.body;
-    await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint]);
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Push unsubscribe error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
 
 // ============ RESTAURANTS ============
 
@@ -229,18 +194,19 @@ app.get('/api/restaurants/:restaurantId/bookings', async (req, res) => {
 app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
   try {
     const { restaurantId } = req.params;
-    // ДОБАВЛЕНО: isAdmin
-    const { tableId, tableLabel, guestName, guestPhone, guestCount, dateTime, timezoneOffset, isAdmin } = req.body;
+    const { tableId, tableLabel, guestName, guestPhone, guestEmail, guestCount, dateTime, timezoneOffset, isAdmin } = req.body;
 
     const normalizedPhone = String(guestPhone || '').replace(/\D/g, '');
+    const normalizedEmail = guestEmail?.trim().toLowerCase() || null;
 
-    // ДЛЯ АДМИНА: Телефон не обязателен. ДЛЯ ГОСТЯ: Обязателен.
+    // ДЛЯ ГОСТЯ: Телефон и email обязательны
     if (!isAdmin && !normalizedPhone) return res.status(400).json({ error: 'Phone number is required' });
+    if (!isAdmin && !normalizedEmail) return res.status(400).json({ error: 'Email is required' });
 
-    // 1. Получаем рабочие часы
-    const restaurantResult = await pool.query('SELECT work_starts, work_ends FROM restaurants WHERE id = $1', [restaurantId]);
+    // 1. Получаем рабочие часы и имя ресторана
+    const restaurantResult = await pool.query('SELECT name, work_starts, work_ends FROM restaurants WHERE id = $1', [restaurantId]);
     if (restaurantResult.rows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
-    const { work_starts, work_ends } = restaurantResult.rows[0];
+    const { name: restaurantName, work_starts, work_ends } = restaurantResult.rows[0];
     const startStr = work_starts || '10:00';
     const endStr = work_ends || '23:00';
 
@@ -271,28 +237,28 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
 
     // === ПРОВЕРКИ ВРЕМЕНИ (ТОЛЬКО ДЛЯ ГОСТЕЙ) ===
     if (!isAdmin) {
-        if (!validShiftStart) return res.status(400).json({ error: `Booking time must be within working hours (${startStr} - ${endStr})` });
+      if (!validShiftStart) return res.status(400).json({ error: `Booking time must be within working hours (${startStr} - ${endStr})` });
 
-        const lastPossibleBooking = new Date(validShiftEnd.getTime() - 60 * 60 * 1000);
-        if (validationDate > lastPossibleBooking) return res.status(400).json({ error: 'The last possible booking time is one hour before closing.' });
+      const lastPossibleBooking = new Date(validShiftEnd.getTime() - 60 * 60 * 1000);
+      if (validationDate > lastPossibleBooking) return res.status(400).json({ error: 'The last possible booking time is one hour before closing.' });
 
-        const existingBookingResult = await pool.query(
-          `SELECT id FROM bookings WHERE restaurant_id = $1 AND regexp_replace(guest_phone, '\\D', '', 'g') = $2 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
-          [restaurantId, normalizedPhone]
-        );
-        if (existingBookingResult.rows.length > 0) return res.status(409).json({ error: 'A booking for this phone number already exists' });
+      const existingBookingResult = await pool.query(
+        `SELECT id FROM bookings WHERE restaurant_id = $1 AND regexp_replace(guest_phone, '\\D', '', 'g') = $2 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
+        [restaurantId, normalizedPhone]
+      );
+      if (existingBookingResult.rows.length > 0) return res.status(409).json({ error: 'A booking for this phone number already exists' });
 
-        const restOfDayBlockResult = await pool.query(
-          `SELECT id FROM bookings WHERE restaurant_id = $1 AND table_id = $2 AND date_time >= $3 AND date_time <= $4 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
-          [restaurantId, tableId, validShiftStart, dateTime]
-        );
-        if (restOfDayBlockResult.rows.length > 0) return res.status(409).json({ error: 'This table is occupied for the rest of the day by an earlier booking.' });
+      const restOfDayBlockResult = await pool.query(
+        `SELECT id FROM bookings WHERE restaurant_id = $1 AND table_id = $2 AND date_time >= $3 AND date_time <= $4 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
+        [restaurantId, tableId, validShiftStart, dateTime]
+      );
+      if (restOfDayBlockResult.rows.length > 0) return res.status(409).json({ error: 'This table is occupied for the rest of the day by an earlier booking.' });
 
-        const doubleBookingResult = await pool.query(
-          `SELECT id FROM bookings WHERE restaurant_id = $1 AND table_id = $2 AND date_time > ($3::timestamp - INTERVAL '1 hour') AND date_time < ($3::timestamp + INTERVAL '1 hour') AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
-          [restaurantId, tableId, dateTime]
-        );
-        if (doubleBookingResult.rows.length > 0) return res.status(409).json({ error: 'This table is already booked near the selected time.' });
+      const doubleBookingResult = await pool.query(
+        `SELECT id FROM bookings WHERE restaurant_id = $1 AND table_id = $2 AND date_time > ($3::timestamp - INTERVAL '1 hour') AND date_time < ($3::timestamp + INTERVAL '1 hour') AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
+        [restaurantId, tableId, dateTime]
+      );
+      if (doubleBookingResult.rows.length > 0) return res.status(409).json({ error: 'This table is already booked near the selected time.' });
     }
     // === КОНЕЦ ПРОВЕРОК ДЛЯ АДМИНА ===
 
@@ -300,26 +266,54 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
     const status = isAdmin ? 'CONFIRMED' : 'PENDING';
 
     const result = await pool.query(`
-      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_count, date_time, status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
-    `, [restaurantId, tableId, tableLabel, guestName, normalizedPhone, guestCount, dateTime, status]);
+    `, [restaurantId, tableId, tableLabel, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status]);
 
-    // Уведомления отправляем только если это гость
+    // Email-уведомления отправляем только если это гость
     if (!isAdmin) {
-        try {
-          const adminSubs = await pool.query(`SELECT endpoint, keys_p256dh, keys_auth FROM push_subscriptions WHERE role = 'ADMIN' AND restaurant_id = $1`, [restaurantId]);
-          if (adminSubs.rows.length > 0) {
-            const bookingTime = formatBookingDate(dateTime, timezoneOffset);
-            await sendPushToSubscriptions(adminSubs.rows, {
-              title: 'Новый запрос на бронирование',
-              body: `${guestName} — стол ${tableLabel}, ${bookingTime}, ${guestCount} гостей`,
-              tag: `booking-${result.rows[0].id}`
-            });
-          }
-        } catch (pushErr) {
-          console.error('Push notification error (admin):', pushErr);
+      const bookingTime = formatBookingDate(dateTime, timezoneOffset);
+      const eName = escapeHtml(guestName);
+      const eTable = escapeHtml(tableLabel);
+
+      // а) Письмо админам ресторана
+      try {
+        const adminRows = await pool.query('SELECT email FROM admins WHERE restaurant_id = $1', [restaurantId]);
+        const adminEmails = adminRows.rows.map(r => r.email).filter(Boolean);
+        if (adminEmails.length > 0) {
+          await sendEmail({
+            to: adminEmails,
+            subject: `Новый запрос на бронирование, ${restaurantName}`,
+            html: `<h2>Новый запрос на бронирование</h2>
+<p><b>Имя:</b> ${eName}</p>
+<p><b>Телефон:</b> ${escapeHtml(normalizedPhone)}</p>
+<p><b>Email:</b> ${escapeHtml(normalizedEmail)}</p>
+<p><b>Стол:</b> ${eTable}</p>
+<p><b>Время:</b> ${escapeHtml(bookingTime)}</p>
+<p><b>Гостей:</b> ${guestCount}</p>`,
+            text: `Новый запрос на бронирование\nИмя: ${guestName}\nТелефон: ${normalizedPhone}\nEmail: ${normalizedEmail}\nСтол: ${tableLabel}\nВремя: ${bookingTime}\nГостей: ${guestCount}`,
+          });
         }
+      } catch (emailErr) {
+        console.error('Email notification error (admin):', emailErr);
+      }
+
+      // б) Письмо гостю
+      try {
+        await sendEmail({
+          to: normalizedEmail,
+          subject: `Запрос на бронирование принят, ${restaurantName}`,
+          html: `<h2>Ваш запрос на бронирование принят</h2>
+<p><b>Стол:</b> ${eTable}</p>
+<p><b>Время:</b> ${escapeHtml(bookingTime)}</p>
+<p><b>Гостей:</b> ${guestCount}</p>
+<p>Вам придёт письмо после решения администратора.</p>`,
+          text: `Ваш запрос на бронирование принят\nСтол: ${tableLabel}\nВремя: ${bookingTime}\nГостей: ${guestCount}\nВам придёт письмо после решения администратора.`,
+        });
+      } catch (emailErr) {
+        console.error('Email notification error (guest):', emailErr);
+      }
     }
 
     res.json(result.rows[0]);
@@ -336,25 +330,39 @@ app.put('/api/bookings/:id/status', async (req, res) => {
     const result = await pool.query('UPDATE bookings SET status = $1, decline_reason = $2 WHERE id = $3 RETURNING *', [status, declineReason || null, id]);
     const booking = result.rows[0];
 
-    if (booking && (status === 'CONFIRMED' || status === 'DECLINED')) {
+    if (booking && (status === 'CONFIRMED' || status === 'DECLINED') && booking.guest_email) {
       try {
-        const normalizedPhone = String(booking.guest_phone || '').replace(/\D/g, '');
-        const guestSubs = await pool.query(`SELECT endpoint, keys_p256dh, keys_auth FROM push_subscriptions WHERE role = 'GUEST' AND guest_phone = $1`, [normalizedPhone]);
-        if (guestSubs.rows.length > 0) {
-          let title, body;
-          const formattedDate = formatBookingDate(booking.date_time, null);
-          if (status === 'CONFIRMED') {
-            const restResult = await pool.query('SELECT name, address FROM restaurants WHERE id = $1', [booking.restaurant_id]);
-            const rest = restResult.rows[0];
-            title = 'Бронирование подтверждено ✅';
-            body = `${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''} — стол ${booking.table_label}, ${formattedDate}`;
-          } else {
-            title = 'Бронирование отклонено ❌';
-            body = declineReason || 'Ваше бронирование было отклонено.';
-          }
-          await sendPushToSubscriptions(guestSubs.rows, { title, body, tag: `booking-status-${booking.id}` });
+        const formattedDate = formatBookingDate(booking.date_time, null);
+        const eTable = escapeHtml(booking.table_label);
+
+        if (status === 'CONFIRMED') {
+          const restResult = await pool.query('SELECT name, address FROM restaurants WHERE id = $1', [booking.restaurant_id]);
+          const rest = restResult.rows[0];
+          const eName = escapeHtml(rest?.name || '');
+          const eAddr = escapeHtml(rest?.address || '');
+          await sendEmail({
+            to: booking.guest_email,
+            subject: 'Бронирование подтверждено ✅',
+            html: `<h2>Ваше бронирование подтверждено!</h2>
+<p><b>Ресторан:</b> ${eName}${eAddr ? ', ' + eAddr : ''}</p>
+<p><b>Стол:</b> ${eTable}</p>
+<p><b>Время:</b> ${escapeHtml(formattedDate)}</p>
+<p><b>Гостей:</b> ${booking.guest_count}</p>`,
+            text: `Ваше бронирование подтверждено!\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nСтол: ${booking.table_label}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}`,
+          });
+        } else {
+          const reason = declineReason || booking.decline_reason || 'Ваше бронирование было отклонено.';
+          await sendEmail({
+            to: booking.guest_email,
+            subject: 'Бронирование отклонено ❌',
+            html: `<h2>Ваше бронирование отклонено</h2>
+<p><b>Стол:</b> ${eTable}</p>
+<p><b>Время:</b> ${escapeHtml(formattedDate)}</p>
+<p><b>Причина:</b> ${escapeHtml(reason)}</p>`,
+            text: `Ваше бронирование отклонено\nСтол: ${booking.table_label}\nВремя: ${formattedDate}\nПричина: ${reason}`,
+          });
         }
-      } catch (pushErr) { console.error('Push notification error (guest):', pushErr); }
+      } catch (emailErr) { console.error('Email notification error (guest status):', emailErr); }
     }
     res.json(booking);
   } catch (error) { console.error('Update booking status error:', error); res.status(500).json({ error: 'Server error' }); }
@@ -363,11 +371,11 @@ app.put('/api/bookings/:id/status', async (req, res) => {
 app.post('/api/bookings/cleanup-expired', async (req, res) => {
   try {
     const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND created_at < NOW() - INTERVAL '1 hour' RETURNING *`);
-    
+
     res.json({ updated: result.rows.length, bookings: result.rows });
-  } catch (error) { 
-    console.error('Cleanup error:', error); 
-    res.status(500).json({ error: 'Server error' }); 
+  } catch (error) {
+    console.error('Cleanup error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
