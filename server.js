@@ -21,7 +21,7 @@ function formatBookingDate(isoDateString, offsetMinutes) {
     });
   }
   return date.toLocaleString('ru-RU', {
-    timeZone: process.env.TZ || 'Asia/Almaty',
+    timeZone: 'Asia/Almaty',
     day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
   });
 }
