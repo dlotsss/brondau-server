@@ -329,8 +329,9 @@ app.put('/api/bookings/:id/status', async (req, res) => {
     const { status, declineReason } = req.body;
     const result = await pool.query('UPDATE bookings SET status = $1, decline_reason = $2 WHERE id = $3 RETURNING *', [status, declineReason || null, id]);
     const booking = result.rows[0];
+    const savedStatus = String(booking?.status || '').toUpperCase();
 
-    if (booking && (status === 'CONFIRMED' || status === 'DECLINED') && booking.guest_email) {
+    if (booking && (savedStatus === 'CONFIRMED' || savedStatus === 'DECLINED') && booking.guest_email) {
       try {
         const formattedDate = formatBookingDate(booking.date_time, null);
         const eTable = escapeHtml(booking.table_label);
@@ -339,7 +340,7 @@ app.put('/api/bookings/:id/status', async (req, res) => {
         const eName = escapeHtml(rest?.name || '');
         const eAddr = escapeHtml(rest?.address || '');
 
-        if (status === 'CONFIRMED') {
+        if (savedStatus === 'CONFIRMED') {
           await sendEmail({
             to: booking.guest_email,
             subject: 'Бронирование подтверждено ✅',
