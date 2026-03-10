@@ -204,11 +204,9 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
     if (!isAdmin && !normalizedEmail) return res.status(400).json({ error: 'Email is required' });
 
     // 1. Получаем рабочие часы и имя ресторана
-    const restaurantResult = await pool.query('SELECT name, work_starts, work_ends FROM restaurants WHERE id = $1', [restaurantId]);
+    const restaurantResult = await pool.query('SELECT name, work_starts, work_ends, schedule FROM restaurants WHERE id = $1', [restaurantId]);
     if (restaurantResult.rows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
-    const { name: restaurantName, work_starts, work_ends } = restaurantResult.rows[0];
-    const startStr = work_starts || '10:00';
-    const endStr = work_ends || '23:00';
+    const { name: restaurantName, work_starts, work_ends, schedule } = restaurantResult.rows[0];
 
     const bookingDate = new Date(dateTime);
     const validationDate = new Date(bookingDate);
@@ -216,28 +214,54 @@ app.post('/api/restaurants/:restaurantId/bookings', async (req, res) => {
       validationDate.setMinutes(validationDate.getMinutes() - timezoneOffset);
     }
 
-    const [startH, startM] = startStr.split(':').map(Number);
-    const [endH, endM] = endStr.split(':').map(Number);
+    // Определяем график с учетом дня недели
+    const getSchedule = (dayIndex) => {
+      // Если у ресторана есть детальное расписание на этот день в БД
+      if (schedule && schedule[dayIndex]) {
+        return schedule[dayIndex];
+      }
+      // Иначе используем стандартные колонки
+      return { start: work_starts || '10:00', end: work_ends || '23:00' };
+    };
 
-    // Определяем смену
+    const todayDay = validationDate.getUTCDay(); // 0 = Воскресенье, 1 = Понедельник ...
+    const yesterdayDate = new Date(validationDate);
+    yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
+    const yesterdayDay = yesterdayDate.getUTCDay();
+
+    const todaySched = getSchedule(todayDay);
+    const yestSched = getSchedule(yesterdayDay);
+
+    // Вычисляем границы смены "сегодня"
+    let [tH, tM] = todaySched.start.split(':').map(Number);
+    let [tEH, tEM] = todaySched.end.split(':').map(Number);
+    let s1 = new Date(validationDate); s1.setUTCHours(tH, tM, 0, 0);
+    let e1 = new Date(s1); e1.setUTCHours(tEH, tEM, 0, 0);
+    if (tEH < tH || (tEH === tH && tEM < tM)) e1.setUTCDate(e1.getUTCDate() + 1);
+
+    // Вычисляем границы смены "вчера" (важно для броней после полуночи)
+    let [yH, yM] = yestSched.start.split(':').map(Number);
+    let [yEH, yEM] = yestSched.end.split(':').map(Number);
+    let s0 = new Date(yesterdayDate); s0.setUTCHours(yH, yM, 0, 0);
+    let e0 = new Date(s0); e0.setUTCHours(yEH, yEM, 0, 0);
+    if (yEH < yH || (yEH === yH && yEM < yM)) e0.setUTCDate(e0.getUTCDate() + 1);
+
     let validShiftStart = null;
     let validShiftEnd = null;
-    let s1 = new Date(validationDate); s1.setUTCHours(startH, startM, 0, 0);
-    let e1 = new Date(s1); e1.setUTCHours(endH, endM, 0, 0);
-    if (endH < startH || (endH === startH && endM < startM)) e1.setUTCDate(e1.getUTCDate() + 1);
-    let s0 = new Date(s1); s0.setUTCDate(s0.getUTCDate() - 1);
-    let e0 = new Date(s0); e0.setUTCHours(endH, endM, 0, 0);
-    if (endH < startH || (endH === startH && endM < startM)) e0.setUTCDate(e0.getUTCDate() + 1);
+    let appliedStartStr = '';
+    let appliedEndStr = '';
 
     if (validationDate >= s1 && validationDate < e1) {
       validShiftStart = s1; validShiftEnd = e1;
+      appliedStartStr = todaySched.start; appliedEndStr = todaySched.end;
     } else if (validationDate >= s0 && validationDate < e0) {
       validShiftStart = s0; validShiftEnd = e0;
+      appliedStartStr = yestSched.start; appliedEndStr = yestSched.end;
     }
 
     // === ПРОВЕРКИ ВРЕМЕНИ (ТОЛЬКО ДЛЯ ГОСТЕЙ) ===
     if (!isAdmin) {
-      if (!validShiftStart) return res.status(400).json({ error: `Booking time must be within working hours (${startStr} - ${endStr})` });
+      if (!validShiftStart) return res.status(400).json({ error: `Время бронирования должно быть в рабочие часы (${appliedStartStr} - ${appliedEndStr})` });
 
       const lastPossibleBooking = new Date(validShiftEnd.getTime() - 60 * 60 * 1000);
       if (validationDate > lastPossibleBooking) return res.status(400).json({ error: 'The last possible booking time is one hour before closing.' });
