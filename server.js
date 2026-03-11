@@ -30,6 +30,31 @@ async function runMigrations() {
   } catch (e) {
     console.log('[migration] with_map column migration skipped:', e.message);
   }
+
+  try {
+    // Create guests table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS guests (
+        phone TEXT PRIMARY KEY,
+        name TEXT,
+        email TEXT,
+        internal_comment TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('[migration] guests table ensured');
+  } catch (e) {
+    console.log('[migration] guests table migration failed:', e.message);
+  }
+
+  try {
+    // Add guest_comment to bookings
+    await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS guest_comment TEXT`);
+    console.log('[migration] bookings.guest_comment column ensured');
+  } catch (e) {
+    console.log('[migration] bookings.guest_comment migration failed:', e.message);
+  }
 }
 
 const app = express();

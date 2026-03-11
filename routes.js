@@ -188,7 +188,7 @@ router.get('/restaurants/:restaurantId/bookings', async (req, res) => {
 router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
   try {
     const { restaurantId } = req.params;
-    const { tableId, tableLabel, guestName, guestPhone, guestEmail, guestCount, dateTime, timezoneOffset, isAdmin } = req.body;
+    const { tableId, tableLabel, guestName, guestPhone, guestEmail, guestCount, dateTime, timezoneOffset, isAdmin, guestComment } = req.body;
 
     const normalizedPhone = String(guestPhone || '').replace(/\D/g, '');
     const normalizedEmail = guestEmail?.trim().toLowerCase() || null;
@@ -274,11 +274,25 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
 
     const status = isAdmin ? 'CONFIRMED' : 'PENDING';
 
+    // Upsert guest
+    try {
+      await pool.query(`
+        INSERT INTO guests (phone, name, email)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (phone) DO UPDATE SET
+          name = EXCLUDED.name,
+          email = EXCLUDED.email,
+          updated_at = CURRENT_TIMESTAMP
+      `, [normalizedPhone, guestName, normalizedEmail]);
+    } catch (guestErr) {
+      console.error('Failed to upsert guest:', guestErr);
+    }
+
     const result = await pool.query(`
-      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *
-    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status]);
+    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null]);
 
     if (!isAdmin) {
       const bookingTime = formatBookingDate(dateTime, timezoneOffset);
@@ -419,6 +433,75 @@ router.get('/restaurants/:restaurantId/admins', async (req, res) => {
     const result = await pool.query('SELECT id, email, created_at FROM admins WHERE restaurant_id = $1', [restaurantId]);
     res.json(result.rows);
   } catch (error) { console.error('Get admins error:', error); res.status(500).json({ error: 'Server error' }); }
+});
+
+// ============ GUESTS ============
+
+router.get('/guests/search', async (req, res) => {
+  try {
+    const { phone } = req.query;
+    const result = await pool.query(`
+      SELECT * FROM guests 
+      WHERE phone LIKE $1 
+      ORDER BY updated_at DESC 
+      LIMIT 20
+    `, [`%${phone || ''}%`]);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Search guests error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.get('/guests/:phone/history', async (req, res) => {
+  try {
+    const { phone } = req.params;
+    
+    // Get stats
+    const statsResult = await pool.query(`
+      SELECT 
+        COUNT(*) as total_bookings,
+        COUNT(*) FILTER (WHERE status = 'DECLINED' AND decline_reason = 'Отменено администратором') as cancelled_by_admin,
+        COUNT(*) FILTER (WHERE status = 'DECLINED' AND decline_reason != 'Отменено администратором') as declined,
+        COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed
+      FROM bookings 
+      WHERE guest_phone = $1
+    `, [phone]);
+
+    // Get history
+    const historyResult = await pool.query(`
+      SELECT b.*, r.name as restaurant_name 
+      FROM bookings b
+      JOIN restaurants r ON b.restaurant_id = r.id
+      WHERE b.guest_phone = $1 
+      ORDER BY b.date_time DESC
+    `, [phone]);
+
+    res.json({
+      stats: statsResult.rows[0],
+      history: historyResult.rows
+    });
+  } catch (error) {
+    console.error('Get guest history error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.put('/guests/:phone', async (req, res) => {
+  try {
+    const { phone } = req.params;
+    const { internalComment, name, email } = req.body;
+    const result = await pool.query(`
+      UPDATE guests 
+      SET internal_comment = $1, name = $2, email = $3, updated_at = CURRENT_TIMESTAMP
+      WHERE phone = $4 
+      RETURNING *
+    `, [internalComment, name, email, phone]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update guest error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 export default router;
