@@ -441,7 +441,14 @@ router.get('/guests/search', async (req, res) => {
   try {
     const { phone } = req.query;
     const result = await pool.query(`
-      SELECT * FROM guests 
+      SELECT 
+        phone, 
+        name, 
+        email, 
+        internal_comment as "internalComment", 
+        created_at as "createdAt", 
+        updated_at as "updatedAt"
+      FROM guests 
       WHERE phone LIKE $1 
       ORDER BY updated_at DESC 
       LIMIT 20
@@ -470,7 +477,21 @@ router.get('/guests/:phone/history', async (req, res) => {
 
     // Get history
     const historyResult = await pool.query(`
-      SELECT b.*, r.name as restaurant_name 
+      SELECT 
+        b.id,
+        b.restaurant_id as "restaurantId",
+        b.table_id as "tableId",
+        b.table_label as "tableLabel",
+        b.guest_name as "guestName",
+        b.guest_phone as "guestPhone",
+        b.guest_email as "guestEmail",
+        b.guest_count as "guestCount",
+        b.date_time as "dateTime",
+        b.status,
+        b.guest_comment as "guestComment",
+        b.decline_reason as "declineReason",
+        b.created_at as "createdAt",
+        r.name as "restaurantName" 
       FROM bookings b
       JOIN restaurants r ON b.restaurant_id = r.id
       WHERE b.guest_phone = $1 
@@ -495,7 +516,13 @@ router.put('/guests/:phone', async (req, res) => {
       UPDATE guests 
       SET internal_comment = $1, name = $2, email = $3, updated_at = CURRENT_TIMESTAMP
       WHERE phone = $4 
-      RETURNING *
+      RETURNING 
+        phone, 
+        name, 
+        email, 
+        internal_comment as "internalComment", 
+        created_at as "createdAt", 
+        updated_at as "updatedAt"
     `, [internalComment, name, email, phone]);
     res.json(result.rows[0]);
   } catch (error) {
