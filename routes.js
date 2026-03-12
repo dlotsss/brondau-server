@@ -155,14 +155,27 @@ router.post('/restaurants', async (req, res) => {
 router.put('/restaurants/:id/layout', async (req, res) => {
   try {
     const { id } = req.params;
-    const { layout, floors } = req.body;
-    let columns = ['layout = $1'];
-    let params = [JSON.stringify(layout)];
-    if (floors) {
-      columns.push('floors = $2');
+    const { layout, floors, bookingRestriction } = req.body;
+    let columns = [];
+    let params = [];
+    let paramIndex = 1;
+
+    if (layout !== undefined) {
+      columns.push(`layout = $${paramIndex++}`);
+      params.push(JSON.stringify(layout));
+    }
+    if (floors !== undefined) {
+      columns.push(`floors = $${paramIndex++}`);
       params.push(JSON.stringify(floors));
     }
-    const query = `UPDATE restaurants SET ${columns.join(', ')} WHERE id = $${params.length + 1} RETURNING *`;
+    if (bookingRestriction !== undefined) {
+      columns.push(`booking_restriction = $${paramIndex++}`);
+      params.push(bookingRestriction);
+    }
+
+    if (columns.length === 0) return res.status(400).json({ error: 'No fields to update' });
+
+    const query = `UPDATE restaurants SET ${columns.join(', ')} WHERE id = $${paramIndex} RETURNING *`;
     params.push(id);
     const result = await pool.query(query, params);
     res.json(result.rows[0]);
@@ -196,9 +209,12 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     if (!isAdmin && !normalizedPhone) return res.status(400).json({ error: 'Phone number is required' });
     if (!isAdmin && !normalizedEmail) return res.status(400).json({ error: 'Email is required' });
 
-    const restaurantResult = await pool.query('SELECT name, work_starts, work_ends, schedule, with_map FROM restaurants WHERE id = $1', [restaurantId]);
+    const restaurantResult = await pool.query('SELECT name, work_starts, work_ends, schedule, with_map, booking_restriction FROM restaurants WHERE id = $1', [restaurantId]);
     if (restaurantResult.rows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
-    const { name: restaurantName, work_starts, work_ends, schedule, with_map } = restaurantResult.rows[0];
+    const { name: restaurantName, work_starts, work_ends, schedule, with_map, booking_restriction } = restaurantResult.rows[0];
+
+    const { duration: requestedDuration } = req.body;
+    const bookingDuration = requestedDuration || (booking_restriction !== -1 ? booking_restriction : 60);
 
     const bookingDate = new Date(dateTime);
     const validationDate = new Date(bookingDate);
@@ -256,19 +272,41 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
       );
       if (existingBookingResult.rows.length > 0) return res.status(409).json({ error: 'A booking for this phone number already exists' });
 
-      // If map is disabled, we don't block based on specific table overlaps
+      // Capacity-based logic for guest bookings
       if (with_map !== false && tableId) {
-        const restOfDayBlockResult = await pool.query(
-          `SELECT id FROM bookings WHERE restaurant_id = $1 AND table_id = $2 AND date_time >= $3 AND date_time <= $4 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
-          [restaurantId, tableId, validShiftStart, dateTime]
+        // Specific table check
+        const conflictResult = await pool.query(
+          `SELECT id FROM bookings 
+           WHERE restaurant_id = $1 AND table_id = $2 
+           AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+           AND (date_time, (COALESCE(duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
+           LIMIT 1`,
+          [restaurantId, tableId, booking_restriction !== -1 ? booking_restriction : 60, dateTime, bookingDuration]
         );
-        if (restOfDayBlockResult.rows.length > 0) return res.status(409).json({ error: 'This table is occupied for the rest of the day by an earlier booking.' });
+        
+        if (conflictResult.rows.length > 0) {
+          return res.status(409).json({ error: 'Этот столик уже занят в выбранное время или рядом с ним.' });
+        }
+      } else {
+        // Capacity check for non-map or no-table bookings
+        // 1. Get total tables
+        const layoutResult = await pool.query('SELECT layout FROM restaurants WHERE id = $1', [restaurantId]);
+        const layout = layoutResult.rows[0]?.layout || [];
+        const totalTables = layout.filter(l => l.type === 'table').length || 1;
 
-        const doubleBookingResult = await pool.query(
-          `SELECT id FROM bookings WHERE restaurant_id = $1 AND table_id = $2 AND date_time > ($3::timestamp - INTERVAL '1 hour') AND date_time < ($3::timestamp + INTERVAL '1 hour') AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
-          [restaurantId, tableId, dateTime]
+        // 2. Count overlapping bookings
+        const countResult = await pool.query(
+          `SELECT COUNT(*) as overlap_count FROM bookings 
+           WHERE restaurant_id = $1 
+           AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+           AND (date_time, (COALESCE(duration, $2) || ' minutes')::interval) OVERLAPS ($3, ($4 || ' minutes')::interval)`,
+          [restaurantId, booking_restriction !== -1 ? booking_restriction : 60, dateTime, bookingDuration]
         );
-        if (doubleBookingResult.rows.length > 0) return res.status(409).json({ error: 'This table is already booked near the selected time.' });
+        
+        const overlapCount = parseInt(countResult.rows[0]?.overlap_count || 0);
+        if (overlapCount >= totalTables) {
+          return res.status(409).json({ error: 'К сожалению, на это время все столики уже забронированы.' });
+        }
       }
     }
 
@@ -289,10 +327,10 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     }
 
     const result = await pool.query(`
-      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
-    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null]);
+    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration]);
 
     if (!isAdmin) {
       const bookingTime = formatBookingDate(dateTime, timezoneOffset);
@@ -346,11 +384,16 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
 router.put('/bookings/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, declineReason, tableId, tableLabel } = req.body;
+    const { status, declineReason, tableId, tableLabel, duration } = req.body;
 
     let query = 'UPDATE bookings SET status = $1, decline_reason = $2';
     const params = [status, declineReason || null];
     let paramIndex = 3;
+
+    if (duration !== undefined) {
+      query += `, duration = $${paramIndex++}`;
+      params.push(duration);
+    }
 
     if (tableId !== undefined) {
       query += `, table_id = $${paramIndex++}, table_label = $${paramIndex++}`;

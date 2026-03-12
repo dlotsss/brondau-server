@@ -66,7 +66,18 @@ async function runMigrations() {
       ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP,
       ADD COLUMN IF NOT EXISTS cancellation_token UUID DEFAULT gen_random_uuid()
     `);
-    console.log('[migration] bookings cancellation columns ensured');
+
+    // Migration: Add booking duration fields
+    await pool.query(`
+      ALTER TABLE restaurants 
+      ADD COLUMN IF NOT EXISTS booking_restriction INTEGER DEFAULT -1
+    `);
+    await pool.query(`
+      ALTER TABLE bookings 
+      ADD COLUMN IF NOT EXISTS duration INTEGER DEFAULT NULL
+    `);
+
+    console.log('Database initialized successfully');
   } catch (e) {
     console.log('[migration] bookings cancellation migration failed:', e.message);
   }
