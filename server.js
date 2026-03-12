@@ -55,6 +55,21 @@ async function runMigrations() {
   } catch (e) {
     console.log('[migration] bookings.guest_comment migration failed:', e.message);
   }
+
+  try {
+    // Add cancellation fields to bookings
+    await pool.query(`
+      ALTER TABLE bookings 
+      ADD COLUMN IF NOT EXISTS cancel_reason TEXT,
+      ADD COLUMN IF NOT EXISTS cancel_comment TEXT,
+      ADD COLUMN IF NOT EXISTS cancelled_by TEXT,
+      ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS cancellation_token UUID DEFAULT gen_random_uuid()
+    `);
+    console.log('[migration] bookings cancellation columns ensured');
+  } catch (e) {
+    console.log('[migration] bookings cancellation migration failed:', e.message);
+  }
 }
 
 const app = express();

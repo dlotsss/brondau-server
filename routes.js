@@ -347,20 +347,20 @@ router.put('/bookings/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { status, declineReason, tableId, tableLabel } = req.body;
-    
+
     let query = 'UPDATE bookings SET status = $1, decline_reason = $2';
     const params = [status, declineReason || null];
     let paramIndex = 3;
-    
+
     if (tableId !== undefined) {
       query += `, table_id = $${paramIndex++}, table_label = $${paramIndex++}`;
       params.push(tableId);
       params.push(tableLabel);
     }
-    
+
     query += ` WHERE id = $${paramIndex} RETURNING *`;
     params.push(id);
-    
+
     const result = await pool.query(query, params);
     const booking = result.rows[0];
     const savedStatus = String(booking?.status || '').toUpperCase();
@@ -375,6 +375,7 @@ router.put('/bookings/:id/status', async (req, res) => {
         const eAddr = escapeHtml(rest?.address || '');
 
         if (savedStatus === 'CONFIRMED') {
+          const cancelLink = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/#/cancel-booking/${booking.cancellation_token}`;
           await sendEmail({
             to: booking.guest_email,
             subject: 'Бронирование подтверждено ✅',
@@ -382,8 +383,10 @@ router.put('/bookings/:id/status', async (req, res) => {
 <p><b>Ресторан:</b> ${eName}${eAddr ? ', ' + eAddr : ''}</p>
 <p><b>Стол:</b> ${eTable}</p>
 <p><b>Время:</b> ${escapeHtml(formattedDate)}</p>
-<p><b>Гостей:</b> ${booking.guest_count}</p>`,
-            text: `Ваше бронирование подтверждено!\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nСтол: ${booking.table_label || 'Ожидает назначения'}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}`,
+<p><b>Гостей:</b> ${booking.guest_count}</p>
+<p style="margin-top: 20px;">Если ваши планы изменились, вы можете отменить бронь по ссылке ниже:</p>
+<p><a href="${cancelLink}" style="background-color: #e53e3e; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Отменить бронь</a></p>`,
+            text: `Ваше бронирование подтверждено!\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nСтол: ${booking.table_label || 'Ожидает назначения'}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}\n\nЕсли ваши планы изменились, вы можете отменить бронь по этой ссылке: ${cancelLink}`,
           });
         } else {
           const reason = declineReason || booking.decline_reason || '';
@@ -405,6 +408,85 @@ router.put('/bookings/:id/status', async (req, res) => {
     }
     res.json(booking);
   } catch (error) { console.error('Update booking status error:', error); res.status(500).json({ error: 'Server error' }); }
+});
+
+// ============ PUBLIC BOOKING CANCELLATION ============
+
+router.get('/public/bookings/cancel-info/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const result = await pool.query(`
+      SELECT 
+        b.id,
+        b.guest_name as "guestName",
+        b.guest_count as "guestCount",
+        b.date_time as "dateTime",
+        b.table_label as "tableLabel",
+        b.status,
+        r.name as "restaurantName"
+      FROM bookings b
+      JOIN restaurants r ON b.restaurant_id = r.id
+      WHERE b.cancellation_token = $1
+    `, [token]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Бронирование не найдено или ссылка недействительна' });
+    }
+
+    const booking = result.rows[0];
+    const canCancel = booking.status === 'CONFIRMED' || booking.status === 'PENDING';
+
+    res.json({
+      bookingId: booking.id,
+      restaurantName: booking.restaurantName,
+      guestName: booking.guestName,
+      guestCount: booking.guestCount,
+      dateTime: booking.dateTime,
+      tableLabel: booking.tableLabel,
+      status: booking.status,
+      canCancel: canCancel
+    });
+  } catch (error) {
+    console.error('Get public cancel info error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/public/bookings/cancel/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { reason, comment } = req.body;
+
+    if (!reason) return res.status(400).json({ error: 'Причина отмены обязательна' });
+    if (reason === 'Other' && !comment?.trim()) {
+      return res.status(400).json({ error: 'Пожалуйста, укажите причину в комментарии' });
+    }
+
+    const checkResult = await pool.query('SELECT id, status FROM bookings WHERE cancellation_token = $1', [token]);
+    if (checkResult.rows.length === 0) return res.status(404).json({ error: 'Бронирование не найдено' });
+
+    const booking = checkResult.rows[0];
+    if (booking.status !== 'CONFIRMED' && booking.status !== 'PENDING') {
+      return res.status(400).json({ error: 'Это бронирование нельзя отменить (текущий статус: ' + booking.status + ')' });
+    }
+
+    const result = await pool.query(`
+      UPDATE bookings 
+      SET 
+        status = 'CANCELLED',
+        cancel_reason = $1,
+        cancel_comment = $2,
+        cancelled_by = 'guest',
+        cancelled_at = NOW()
+      WHERE cancellation_token = $3
+      RETURNING *
+    `, [reason, comment || null, token]);
+
+    res.json({ success: true, booking: result.rows[0] });
+  } catch (error) {
+    console.error('Public cancel booking error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 router.post('/bookings/cleanup-expired', async (req, res) => {
@@ -463,13 +545,14 @@ router.get('/guests/search', async (req, res) => {
 router.get('/guests/:phone/history', async (req, res) => {
   try {
     const { phone } = req.params;
-    
+
     // Get stats
     const statsResult = await pool.query(`
       SELECT 
         COUNT(*) as total_bookings,
         COUNT(*) FILTER (WHERE status = 'DECLINED' AND decline_reason = 'Отменено администратором') as cancelled_by_admin,
         COUNT(*) FILTER (WHERE status = 'DECLINED' AND decline_reason != 'Отменено администратором') as declined,
+        COUNT(*) FILTER (WHERE status = 'CANCELLED') as cancelled_by_guest,
         COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed
       FROM bookings 
       WHERE guest_phone = $1
@@ -490,6 +573,8 @@ router.get('/guests/:phone/history', async (req, res) => {
         b.status,
         b.guest_comment as "guestComment",
         b.decline_reason as "declineReason",
+        b.cancel_reason as "cancelReason",
+        b.cancel_comment as "cancelComment",
         b.created_at as "createdAt",
         r.name as "restaurantName" 
       FROM bookings b
