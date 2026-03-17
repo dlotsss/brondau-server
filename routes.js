@@ -263,8 +263,15 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     if (!isAdmin) {
       if (!validShiftStart) return res.status(400).json({ error: `Время бронирования должно быть в рабочие часы (${appliedStartStr} - ${appliedEndStr})` });
 
+      const now = new Date();
+      if (timezoneOffset !== undefined) {
+          now.setMinutes(now.getMinutes() - timezoneOffset);
+      }
+      const minBookingTime = new Date(now.getTime() + 60 * 60 * 1000);
+      if (validationDate < minBookingTime) return res.status(400).json({ error: 'Бронирование доступно минимум за 1 час до начала.' });
+
       const lastPossibleBooking = new Date(validShiftEnd.getTime() - 60 * 60 * 1000);
-      if (validationDate > lastPossibleBooking) return res.status(400).json({ error: 'The last possible booking time is one hour before closing.' });
+      if (validationDate > lastPossibleBooking) return res.status(400).json({ error: 'Предпоследняя бронь возможна за час до закрытия.' });
 
       const existingBookingResult = await pool.query(
         `SELECT id FROM bookings WHERE restaurant_id = $1 AND regexp_replace(guest_phone, '\\D', '', 'g') = $2 AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED') LIMIT 1`,
@@ -283,7 +290,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
            LIMIT 1`,
           [restaurantId, tableId, booking_restriction !== -1 ? booking_restriction : 60, dateTime, bookingDuration]
         );
-        
+
         if (conflictResult.rows.length > 0) {
           return res.status(409).json({ error: 'Этот столик уже занят в выбранное время или рядом с ним.' });
         }
@@ -302,7 +309,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
            AND (date_time, (COALESCE(duration, $2) || ' minutes')::interval) OVERLAPS ($3, ($4 || ' minutes')::interval)`,
           [restaurantId, booking_restriction !== -1 ? booking_restriction : 60, dateTime, bookingDuration]
         );
-        
+
         const overlapCount = parseInt(countResult.rows[0]?.overlap_count || 0);
         if (overlapCount >= totalTables) {
           return res.status(409).json({ error: 'К сожалению, на это время все столики уже забронированы.' });
@@ -418,7 +425,8 @@ router.put('/bookings/:id/status', async (req, res) => {
         const eAddr = escapeHtml(rest?.address || '');
 
         if (savedStatus === 'CONFIRMED') {
-          const cancelLink = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/#/cancel-booking/${booking.cancellation_token}`;
+          const origin = req.get('Origin') || (req.get('Referrer') ? new URL(req.get('Referrer')).origin : 'http://localhost:5173');
+          const cancelLink = `${process.env.FRONTEND_URL || origin}/#/cancel-booking/${booking.cancellation_token}`;
           await sendEmail({
             to: booking.guest_email,
             subject: 'Бронирование подтверждено ✅',
