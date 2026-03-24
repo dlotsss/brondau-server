@@ -95,6 +95,24 @@ async function runMigrations() {
   } catch (e) {
     console.log('[migration] bookings cancellation migration failed:', e.message);
   }
+
+  try {
+    // Add assigned_to column to bookings
+    await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS assigned_to TEXT`);
+    
+    // Create staff_names table for autocomplete memory
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS staff_names (
+        id SERIAL PRIMARY KEY,
+        restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        CONSTRAINT unique_staff_name UNIQUE (restaurant_id, name)
+      )
+    `);
+    console.log('[migration] assigned_to and staff_names ensured');
+  } catch (e) {
+    console.log('[migration] assigned_to/staff_names migration failed:', e.message);
+  }
 }
 
 const app = express();

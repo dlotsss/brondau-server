@@ -212,10 +212,24 @@ router.get('/restaurants/:restaurantId/bookings', async (req, res) => {
   }
 });
 
+router.get('/restaurants/:restaurantId/staff-names', async (req, res) => {
+  try {
+    const { restaurantId } = req.params;
+    const result = await pool.query(
+      'SELECT name FROM staff_names WHERE restaurant_id = $1 ORDER BY name',
+      [restaurantId]
+    );
+    res.json(result.rows.map(r => r.name));
+  } catch (error) {
+    console.error('Get staff names error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
   try {
     const { restaurantId } = req.params;
-    const { tableId, tableLabel, guestName, guestPhone, guestEmail, guestCount, dateTime, timezoneOffset, isAdmin, guestComment } = req.body;
+    const { tableId, tableLabel, guestName, guestPhone, guestEmail, guestCount, dateTime, timezoneOffset, isAdmin, guestComment, assignedTo } = req.body;
 
     const normalizedPhone = String(guestPhone || '').replace(/\D/g, '');
     const normalizedEmail = guestEmail?.trim().toLowerCase() || null;
@@ -348,10 +362,18 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     }
 
     const result = await pool.query(`
-      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration, assigned_to)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
-    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration]);
+    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration, assignedTo || null]);
+
+    // Auto-save staff name for autocomplete
+    if (assignedTo && assignedTo.trim()) {
+      pool.query(
+        `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
+        [restaurantId, assignedTo.trim()]
+      ).catch(() => {});
+    }
 
     if (!isAdmin) {
       const bookingTime = formatBookingDate(dateTime, timezoneOffset);
@@ -405,7 +427,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
 router.put('/bookings/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, declineReason, tableId, tableLabel, duration, tableIds, tableLabels } = req.body;
+    const { status, declineReason, tableId, tableLabel, duration, tableIds, tableLabels, assignedTo } = req.body;
 
     const finalTableIds = tableIds || (tableId ? [tableId] : []);
     const finalTableLabels = tableLabels || (tableLabel ? [tableLabel] : []);
@@ -467,6 +489,11 @@ router.put('/bookings/:id/status', async (req, res) => {
       params.push(duration);
     }
 
+    if (assignedTo !== undefined) {
+      query += `, assigned_to = $${paramIndex++}`;
+      params.push(assignedTo || null);
+    }
+
     if (finalTableIds.length > 0 || tableId === null || (tableIds && tableIds.length === 0)) {
       query += `, table_id = $${paramIndex++}, table_label = $${paramIndex++}`;
       params.push(legacyTableId);
@@ -492,6 +519,14 @@ router.put('/bookings/:id/status', async (req, res) => {
       }
       
       await client.query('COMMIT');
+
+      // Auto-save staff name for autocomplete
+      if (assignedTo && assignedTo.trim() && booking?.restaurant_id) {
+        pool.query(
+          `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
+          [booking.restaurant_id, assignedTo.trim()]
+        ).catch(() => {});
+      }
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;
@@ -708,6 +743,7 @@ router.get('/guests/:phone/history', async (req, res) => {
         b.date_time as "dateTime",
         b.status,
         b.guest_comment as "guestComment",
+        b.assigned_to as "assignedTo",
         b.decline_reason as "declineReason",
         b.cancel_reason as "cancelReason",
         b.cancel_comment as "cancelComment",
