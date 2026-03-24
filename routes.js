@@ -190,7 +190,21 @@ router.put('/restaurants/:id/layout', async (req, res) => {
 router.get('/restaurants/:restaurantId/bookings', async (req, res) => {
   try {
     const { restaurantId } = req.params;
-    const result = await pool.query('SELECT * FROM bookings WHERE restaurant_id = $1 ORDER BY date_time DESC', [restaurantId]);
+    const result = await pool.query(`
+      SELECT 
+        b.*,
+        COALESCE(
+          (SELECT json_agg(bt.table_id) FROM booking_tables bt WHERE bt.booking_id = b.id), 
+          '[]'::json
+        ) as "tableIds",
+        COALESCE(
+          (SELECT json_agg(bt.table_label) FROM booking_tables bt WHERE bt.booking_id = b.id), 
+          '[]'::json
+        ) as "tableLabels"
+      FROM bookings b 
+      WHERE b.restaurant_id = $1 
+      ORDER BY b.date_time DESC
+    `, [restaurantId]);
     res.json(result.rows);
   } catch (error) {
     console.error('Get bookings error:', error);
@@ -391,7 +405,58 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
 router.put('/bookings/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, declineReason, tableId, tableLabel, duration } = req.body;
+    const { status, declineReason, tableId, tableLabel, duration, tableIds, tableLabels } = req.body;
+
+    const finalTableIds = tableIds || (tableId ? [tableId] : []);
+    const finalTableLabels = tableLabels || (tableLabel ? [tableLabel] : []);
+
+    if (status === 'CONFIRMED' && finalTableIds.length > 0) {
+       const bookingRes = await pool.query('SELECT restaurant_id, date_time, duration, guest_count FROM bookings WHERE id = $1', [id]);
+       if (bookingRes.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
+       const { restaurant_id, date_time, duration: currentDuration, guest_count } = bookingRes.rows[0];
+       
+       const restaurantRes = await pool.query('SELECT layout, booking_restriction FROM restaurants WHERE id = $1', [restaurant_id]);
+       const { layout, booking_restriction } = restaurantRes.rows[0];
+       
+       const selectedTables = (layout || []).filter(el => el.type === 'table' && finalTableIds.includes(el.id));
+       const totalSeats = selectedTables.reduce((sum, t) => sum + (t.seats || 2), 0);
+       
+       if (totalSeats > 0 && totalSeats < guest_count) {
+           return res.status(400).json({ error: `Суммарной вместимости столов (${totalSeats}) недостаточно для ${guest_count} гостей` });
+       }
+       
+       const bDuration = duration !== undefined ? duration : (currentDuration || (booking_restriction !== -1 ? booking_restriction : 60));
+       
+       const conflictQuery = `
+         SELECT b.id 
+         FROM bookings b
+         LEFT JOIN booking_tables bt ON b.id = bt.booking_id
+         WHERE b.restaurant_id = $1
+           AND b.status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+           AND (b.table_id = ANY($2) OR bt.table_id = ANY($2))
+           AND b.id != $3
+           AND (
+             b.date_time, 
+             (COALESCE(b.duration, $4) || ' minutes')::interval
+           ) OVERLAPS (
+             $5::timestamp, 
+             ($6 || ' minutes')::interval
+           )
+         LIMIT 1
+       `;
+       const overlaps = await pool.query(conflictQuery, [
+         restaurant_id, finalTableIds, id, 
+         booking_restriction !== -1 ? booking_restriction : 60,
+         date_time, bDuration
+       ]);
+       
+       if (overlaps.rows.length > 0) {
+           return res.status(409).json({ error: 'Один или несколько выбранных столов уже заняты на это время.' });
+       }
+    }
+
+    const legacyTableId = finalTableIds.length > 0 ? finalTableIds[0] : null;
+    const legacyTableLabel = finalTableLabels.length > 0 ? finalTableLabels.join(', ') : null;
 
     let query = 'UPDATE bookings SET status = $1, decline_reason = $2';
     const params = [status, declineReason || null];
@@ -402,17 +467,37 @@ router.put('/bookings/:id/status', async (req, res) => {
       params.push(duration);
     }
 
-    if (tableId !== undefined) {
+    if (finalTableIds.length > 0 || tableId === null || (tableIds && tableIds.length === 0)) {
       query += `, table_id = $${paramIndex++}, table_label = $${paramIndex++}`;
-      params.push(tableId);
-      params.push(tableLabel);
+      params.push(legacyTableId);
+      params.push(legacyTableLabel);
     }
 
     query += ` WHERE id = $${paramIndex} RETURNING *`;
     params.push(id);
 
-    const result = await pool.query(query, params);
-    const booking = result.rows[0];
+    const client = await pool.connect();
+    let booking;
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(query, params);
+      booking = result.rows[0];
+      
+      if (finalTableIds.length > 0 || tableId === null || (tableIds && tableIds.length === 0)) {
+          await client.query('DELETE FROM booking_tables WHERE booking_id = $1', [id]);
+          if (finalTableIds.length > 0) {
+              const insertValues = finalTableIds.map((tId, idx) => `('${id}', '${tId}', '${(finalTableLabels[idx] || '').replace(/'/g, "''")}')`).join(', ');
+              await client.query(`INSERT INTO booking_tables (booking_id, table_id, table_label) VALUES ${insertValues}`);
+          }
+      }
+      
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
     const savedStatus = String(booking?.status || '').toUpperCase();
 
     if (booking && (savedStatus === 'CONFIRMED' || savedStatus === 'DECLINED') && booking.guest_email) {

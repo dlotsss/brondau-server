@@ -57,6 +57,20 @@ async function runMigrations() {
   }
 
   try {
+    // Create booking_tables for multiple tables support
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS booking_tables (
+        id SERIAL PRIMARY KEY,
+        booking_id UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+        table_id TEXT NOT NULL,
+        table_label TEXT,
+        CONSTRAINT unique_booking_table UNIQUE (booking_id, table_id)
+      )
+    `);
+    
+    // Create index for fast layout checks
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_booking_tables_table_id ON booking_tables(table_id)`);
+    
     // Add cancellation fields to bookings
     await pool.query(`
       ALTER TABLE bookings 
