@@ -49,6 +49,14 @@ async function runMigrations() {
   }
 
   try {
+    // Delete invalid guests with empty phones (walk-in bug)
+    await pool.query(`DELETE FROM guests WHERE phone = '' OR phone IS NULL`);
+    console.log('[migration] cleaned up invalid guests');
+  } catch (e) {
+    console.log('[migration] clean up guests failed:', e.message);
+  }
+
+  try {
     // Add guest_comment to bookings
     await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS guest_comment TEXT`);
     console.log('[migration] bookings.guest_comment column ensured');

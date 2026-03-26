@@ -348,17 +348,19 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     const status = isAdmin ? 'CONFIRMED' : 'PENDING';
 
     // Upsert guest
-    try {
-      await pool.query(`
-        INSERT INTO guests (phone, name, email)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (phone) DO UPDATE SET
-          name = EXCLUDED.name,
-          email = EXCLUDED.email,
-          updated_at = CURRENT_TIMESTAMP
-      `, [normalizedPhone, guestName, normalizedEmail]);
-    } catch (guestErr) {
-      console.error('Failed to upsert guest:', guestErr);
+    if (normalizedPhone) {
+      try {
+        await pool.query(`
+          INSERT INTO guests (phone, name, email)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (phone) DO UPDATE SET
+            name = EXCLUDED.name,
+            email = EXCLUDED.email,
+            updated_at = CURRENT_TIMESTAMP
+        `, [normalizedPhone, guestName, normalizedEmail]);
+      } catch (guestErr) {
+        console.error('Failed to upsert guest:', guestErr);
+      }
     }
 
     const result = await pool.query(`
@@ -702,7 +704,7 @@ router.get('/guests/search', async (req, res) => {
         created_at as "createdAt", 
         updated_at as "updatedAt"
       FROM guests 
-      WHERE phone LIKE $1 
+      WHERE phone != '' AND phone IS NOT NULL AND phone LIKE $1 
       ORDER BY updated_at DESC 
       LIMIT 20
     `, [`%${phone || ''}%`]);
