@@ -426,6 +426,91 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
   }
 });
 
+router.put('/bookings/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { guestName, guestPhone, guestEmail, guestCount, dateTime, tableId, tableLabel, guestComment, duration, assignedTo } = req.body;
+
+    const bookingRes = await pool.query('SELECT restaurant_id, status FROM bookings WHERE id = $1', [id]);
+    if (bookingRes.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
+    const { restaurant_id, status } = bookingRes.rows[0];
+
+    const restaurantResult = await pool.query('SELECT name, work_starts, work_ends, schedule, with_map, booking_restriction, layout FROM restaurants WHERE id = $1', [restaurant_id]);
+    if (restaurantResult.rows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
+    const restaurant = restaurantResult.rows[0];
+
+    const bookingDuration = duration || (restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60);
+
+    if (['PENDING', 'CONFIRMED', 'OCCUPIED'].includes(status)) {
+        if (restaurant.with_map !== false && tableId) {
+            const conflictResult = await pool.query(
+              `SELECT id FROM bookings 
+               WHERE restaurant_id = $1 AND table_id = $2 
+               AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+               AND id != $6
+               AND (date_time, (COALESCE(duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
+               LIMIT 1`,
+              [restaurant_id, tableId, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
+            );
+
+            if (conflictResult.rows.length > 0) {
+              return res.status(409).json({ error: 'Этот столик уже занят в выбранное время или рядом с ним.' });
+            }
+        }
+    }
+
+    const normalizedPhone = String(guestPhone || '').replace(/\D/g, '');
+    const normalizedEmail = guestEmail?.trim().toLowerCase() || null;
+
+    if (normalizedPhone) {
+      try {
+        await pool.query(`
+          INSERT INTO guests (phone, name, email)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (phone) DO UPDATE SET
+            name = EXCLUDED.name,
+            email = EXCLUDED.email,
+            updated_at = CURRENT_TIMESTAMP
+        `, [normalizedPhone, guestName, normalizedEmail]);
+      } catch (guestErr) {
+        console.error('Failed to upsert guest:', guestErr);
+      }
+    }
+
+    const updateQuery = `
+      UPDATE bookings SET
+        guest_name = $1,
+        guest_phone = $2,
+        guest_email = $3,
+        guest_count = $4,
+        date_time = $5,
+        table_id = $6,
+        table_label = $7,
+        guest_comment = $8,
+        duration = $9,
+        assigned_to = $10
+      WHERE id = $11
+      RETURNING *
+    `;
+
+    const result = await pool.query(updateQuery, [
+      guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, tableId || null, tableLabel || null, guestComment || null, bookingDuration, assignedTo || null, id
+    ]);
+
+    if (assignedTo && assignedTo.trim()) {
+      pool.query(
+        `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
+        [restaurant_id, assignedTo.trim()]
+      ).catch(() => {});
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update booking details error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.put('/bookings/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
