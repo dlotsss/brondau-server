@@ -99,6 +99,12 @@ async function runMigrations() {
       ADD COLUMN IF NOT EXISTS duration INTEGER DEFAULT NULL
     `);
 
+    // Migration: Add age restriction message field
+    await pool.query(`
+      ALTER TABLE restaurants 
+      ADD COLUMN IF NOT EXISTS age_restriction TEXT
+    `);
+
     console.log('Database initialized successfully');
   } catch (e) {
     console.log('[migration] bookings cancellation migration failed:', e.message);

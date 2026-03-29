@@ -155,7 +155,7 @@ router.post('/restaurants', async (req, res) => {
 router.put('/restaurants/:id/layout', async (req, res) => {
   try {
     const { id } = req.params;
-    const { layout, floors, bookingRestriction } = req.body;
+    const { layout, floors, bookingRestriction, ageRestriction } = req.body;
     let columns = [];
     let params = [];
     let paramIndex = 1;
@@ -171,6 +171,10 @@ router.put('/restaurants/:id/layout', async (req, res) => {
     if (bookingRestriction !== undefined) {
       columns.push(`booking_restriction = $${paramIndex++}`);
       params.push(bookingRestriction);
+    }
+    if (ageRestriction !== undefined) {
+      columns.push(`age_restriction = $${paramIndex++}`);
+      params.push(ageRestriction);
     }
 
     if (columns.length === 0) return res.status(400).json({ error: 'No fields to update' });
