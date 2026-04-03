@@ -105,6 +105,12 @@ async function runMigrations() {
       ADD COLUMN IF NOT EXISTS age_restriction TEXT
     `);
 
+    // Migration: Add deposit disclaimer field
+    await pool.query(`
+      ALTER TABLE restaurants 
+      ADD COLUMN IF NOT EXISTS deposit TEXT
+    `);
+
     console.log('Database initialized successfully');
   } catch (e) {
     console.log('[migration] bookings cancellation migration failed:', e.message);
