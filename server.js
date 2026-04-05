@@ -108,7 +108,9 @@ async function runMigrations() {
     // Migration: Add deposit disclaimer field
     await pool.query(`
       ALTER TABLE restaurants 
-      ADD COLUMN IF NOT EXISTS deposit TEXT
+      ADD COLUMN IF NOT EXISTS deposit TEXT,
+      ADD COLUMN IF NOT EXISTS age_restriction_kz TEXT,
+      ADD COLUMN IF NOT EXISTS deposit_kz TEXT
     `);
 
     console.log('Database initialized successfully');
