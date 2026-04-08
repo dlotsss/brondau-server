@@ -157,7 +157,12 @@ async function registerWebhook(baseUrl) {
     return;
   }
 
-  const webhookUrl = `${baseUrl}/api/telegram/webhook`;
+  // Remove trailing slashes and ensure https://
+  let cleanBase = baseUrl.trim();
+  if (cleanBase.endsWith('/')) cleanBase = cleanBase.slice(0, -1);
+  if (!cleanBase.startsWith('http')) cleanBase = 'https://' + cleanBase;
+
+  const webhookUrl = `${cleanBase}/api/telegram/webhook`;
 
   try {
     const res = await fetch(`${API_BASE}/setWebhook`, {
