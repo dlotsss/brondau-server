@@ -166,8 +166,8 @@ const PORT = process.env.PORT || 3001;
 runMigrations().then(async () => {
   app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
 
-  // Register Telegram webhook if FRONTEND_URL or VERCEL_URL is available
-  const baseUrl = process.env.FRONTEND_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null);
+  // Register Telegram webhook if BACKEND_URL or VERCEL_URL is available
+  const baseUrl = process.env.BACKEND_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : (process.env.FRONTEND_URL || null));
   if (baseUrl && process.env.TELEGRAM_BOT_TOKEN) {
     await registerWebhook(baseUrl);
   }

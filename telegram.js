@@ -59,6 +59,7 @@ async function notifyRestaurantAdmins(restaurantId, text) {
 // ============ WEBHOOK COMMAND HANDLER ============
 
 async function handleUpdate(update) {
+  console.log('[telegram] Incoming update:', JSON.stringify(update));
   const message = update?.message;
   if (!message || !message.text) return;
 
