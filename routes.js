@@ -3,6 +3,7 @@ import bcrypt from 'bcrypt';
 import { Resend } from 'resend';
 import dotenv from 'dotenv';
 import pool from './db.js';
+import { notifyRestaurantAdmins } from './telegram.js';
 
 dotenv.config();
 
@@ -407,6 +408,23 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
         console.error('Email notification error (admin):', emailErr);
       }
 
+      // Telegram notification to admins
+      try {
+        await notifyRestaurantAdmins(restaurantId,
+          `🔔 <b>Новый запрос на бронирование</b>\n\n` +
+          `📍 ${restaurantName}\n` +
+          `👤 ${guestName}\n` +
+          `📞 ${normalizedPhone}\n` +
+          `📧 ${normalizedEmail}\n` +
+          `🪑 Стол: ${tableLabel || 'Ожидает назначения'}\n` +
+          `🕐 ${bookingTime}\n` +
+          `👥 Гостей: ${guestCount}` +
+          (guestComment ? `\n💬 ${guestComment}` : '')
+        );
+      } catch (tgErr) {
+        console.error('Telegram notification error:', tgErr);
+      }
+
       try {
         await sendEmail({
           to: normalizedEmail,
@@ -744,7 +762,29 @@ router.post('/public/bookings/cancel/:token', async (req, res) => {
       RETURNING *
     `, [reason, comment || null, token]);
 
-    res.json({ success: true, booking: result.rows[0] });
+    // Telegram notification to admins about guest cancellation
+    const cancelled = result.rows[0];
+    try {
+      const restaurantResult = await pool.query('SELECT name FROM restaurants WHERE id = $1', [cancelled.restaurant_id]);
+      const rName = restaurantResult.rows[0]?.name || 'Ресторан';
+      const cancelDate = new Date(cancelled.date_time).toLocaleString('ru-RU', {
+        timeZone: 'Asia/Almaty',
+        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+      });
+      await notifyRestaurantAdmins(cancelled.restaurant_id,
+        `❌ <b>Гость отменил бронирование</b>\n\n` +
+        `📍 ${rName}\n` +
+        `👤 ${cancelled.guest_name}\n` +
+        `📞 ${cancelled.guest_phone}\n` +
+        `🕐 ${cancelDate}\n` +
+        `📝 Причина: ${reason}` +
+        (comment ? `\n💬 ${comment}` : '')
+      );
+    } catch (tgErr) {
+      console.error('Telegram cancel notification error:', tgErr);
+    }
+
+    res.json({ success: true, booking: cancelled });
   } catch (error) {
     console.error('Public cancel booking error:', error);
     res.status(500).json({ error: 'Server error' });

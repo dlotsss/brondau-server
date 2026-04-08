@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import apiRoutes from './routes.js';
 import pool from './db.js';
+import { handleUpdate, registerWebhook } from './telegram.js';
 
 dotenv.config();
 
@@ -135,6 +136,13 @@ async function runMigrations() {
   } catch (e) {
     console.log('[migration] assigned_to/staff_names migration failed:', e.message);
   }
+
+  try {
+    await pool.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT`);
+    console.log('[migration] admins.telegram_chat_id ensured');
+  } catch (e) {
+    console.log('[migration] telegram_chat_id migration failed:', e.message);
+  }
 }
 
 const app = express();
@@ -143,7 +151,24 @@ app.use(express.json());
 
 app.use('/api', apiRoutes);
 
+// Telegram webhook endpoint
+app.post('/api/telegram/webhook', async (req, res) => {
+  try {
+    await handleUpdate(req.body);
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('[telegram] webhook handler error:', err);
+    res.sendStatus(200); // Always return 200 to Telegram
+  }
+});
+
 const PORT = process.env.PORT || 3001;
-runMigrations().then(() => {
+runMigrations().then(async () => {
   app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+
+  // Register Telegram webhook if FRONTEND_URL or VERCEL_URL is available
+  const baseUrl = process.env.FRONTEND_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null);
+  if (baseUrl && process.env.TELEGRAM_BOT_TOKEN) {
+    await registerWebhook(baseUrl);
+  }
 });
