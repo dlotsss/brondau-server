@@ -164,11 +164,17 @@ app.post('/api/telegram/webhook', async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 runMigrations().then(async () => {
-  app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+  if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+  }
 
-  // Register Telegram webhook if BACKEND_URL or VERCEL_URL is available
+  // Register Telegram webhook
   const baseUrl = process.env.BACKEND_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : (process.env.FRONTEND_URL || null));
   if (baseUrl && process.env.TELEGRAM_BOT_TOKEN) {
     await registerWebhook(baseUrl);
   }
+}).catch(err => {
+  console.error('Fatal migration error:', err);
 });
+
+export default app;

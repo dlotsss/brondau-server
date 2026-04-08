@@ -19,7 +19,10 @@ const pool = new Pool({
   database: database,
   ssl: {
     rejectUnauthorized: false
-  }
+  },
+  max: 2, // Limit connections per instance for serverless
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
 export default pool;
