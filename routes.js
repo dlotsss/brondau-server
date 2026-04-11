@@ -823,20 +823,25 @@ router.get('/restaurants/:restaurantId/admins', async (req, res) => {
 
 router.get('/guests/search', async (req, res) => {
   try {
-    const { phone } = req.query;
+    const { phone, restaurantId } = req.query;
+    if (!restaurantId) return res.status(400).json({ error: 'restaurantId is required' });
+
     const result = await pool.query(`
-      SELECT 
-        phone, 
-        name, 
-        email, 
-        internal_comment as "internalComment", 
-        created_at as "createdAt", 
-        updated_at as "updatedAt"
-      FROM guests 
-      WHERE phone != '' AND phone IS NOT NULL AND phone LIKE $1 
-      ORDER BY updated_at DESC 
+      SELECT DISTINCT
+        g.phone, 
+        g.name, 
+        g.email, 
+        rg.internal_comment as "internalComment", 
+        g.created_at as "createdAt", 
+        g.updated_at as "updatedAt"
+      FROM guests g
+      JOIN bookings b ON g.phone = b.guest_phone
+      LEFT JOIN restaurant_guests rg ON g.phone = rg.phone AND rg.restaurant_id = $1
+      WHERE b.restaurant_id = $1
+        AND g.phone != '' AND g.phone IS NOT NULL AND g.phone LIKE $2 
+      ORDER BY g.updated_at DESC 
       LIMIT 20
-    `, [`%${phone || ''}%`]);
+    `, [restaurantId, `%${phone || ''}%`]);
     res.json(result.rows);
   } catch (error) {
     console.error('Search guests error:', error);
@@ -847,6 +852,8 @@ router.get('/guests/search', async (req, res) => {
 router.get('/guests/:phone/history', async (req, res) => {
   try {
     const { phone } = req.params;
+    const { restaurantId } = req.query;
+    if (!restaurantId) return res.status(400).json({ error: 'restaurantId is required' });
 
     // Get stats
     const statsResult = await pool.query(`
@@ -857,8 +864,8 @@ router.get('/guests/:phone/history', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'CANCELLED') as cancelled_by_guest,
         COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed
       FROM bookings 
-      WHERE guest_phone = $1
-    `, [phone]);
+      WHERE guest_phone = $1 AND restaurant_id = $2
+    `, [phone, restaurantId]);
 
     // Get history
     const historyResult = await pool.query(`
@@ -882,9 +889,9 @@ router.get('/guests/:phone/history', async (req, res) => {
         r.name as "restaurantName" 
       FROM bookings b
       JOIN restaurants r ON b.restaurant_id = r.id
-      WHERE b.guest_phone = $1 
+      WHERE b.guest_phone = $1 AND b.restaurant_id = $2
       ORDER BY b.date_time DESC
-    `, [phone]);
+    `, [phone, restaurantId]);
 
     res.json({
       stats: statsResult.rows[0],
@@ -899,19 +906,38 @@ router.get('/guests/:phone/history', async (req, res) => {
 router.put('/guests/:phone', async (req, res) => {
   try {
     const { phone } = req.params;
-    const { internalComment, name, email } = req.body;
-    const result = await pool.query(`
+    const { internalComment, name, email, restaurantId } = req.body;
+    if (!restaurantId) return res.status(400).json({ error: 'restaurantId is required' });
+
+    // Update global profile info
+    await pool.query(`
       UPDATE guests 
-      SET internal_comment = $1, name = $2, email = $3, updated_at = CURRENT_TIMESTAMP
-      WHERE phone = $4 
-      RETURNING 
-        phone, 
-        name, 
-        email, 
-        internal_comment as "internalComment", 
-        created_at as "createdAt", 
-        updated_at as "updatedAt"
-    `, [internalComment, name, email, phone]);
+      SET name = $1, email = $2, updated_at = CURRENT_TIMESTAMP
+      WHERE phone = $3
+    `, [name, email, phone]);
+
+    // Upsert restaurant-specific comment
+    await pool.query(`
+      INSERT INTO restaurant_guests (restaurant_id, phone, internal_comment)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (restaurant_id, phone) DO UPDATE
+      SET internal_comment = EXCLUDED.internal_comment
+    `, [restaurantId, phone, internalComment]);
+
+    // Return merged result
+    const result = await pool.query(`
+      SELECT 
+        g.phone, 
+        g.name, 
+        g.email, 
+        rg.internal_comment as "internalComment", 
+        g.created_at as "createdAt", 
+        g.updated_at as "updatedAt"
+      FROM guests g
+      LEFT JOIN restaurant_guests rg ON g.phone = rg.phone AND rg.restaurant_id = $1
+      WHERE g.phone = $2
+    `, [restaurantId, phone]);
+
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Update guest error:', error);

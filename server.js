@@ -120,8 +120,29 @@ async function runMigrations() {
       ADD COLUMN IF NOT EXISTS city TEXT DEFAULT 'Алмата'
     `);
     
+    
     // Set default city for existing restaurants
     await pool.query(`UPDATE restaurants SET city = 'Алмата' WHERE city IS NULL`);
+
+    // Migration: Isolate guest db
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS restaurant_guests (
+        restaurant_id UUID REFERENCES restaurants(id) ON DELETE CASCADE,
+        phone TEXT REFERENCES guests(phone) ON DELETE CASCADE,
+        internal_comment TEXT,
+        PRIMARY KEY (restaurant_id, phone)
+      )
+    `);
+
+    // Migrate old comments to all restaurants they visited
+    await pool.query(`
+      INSERT INTO restaurant_guests (restaurant_id, phone, internal_comment)
+      SELECT DISTINCT b.restaurant_id, g.phone, g.internal_comment
+      FROM guests g
+      JOIN bookings b ON g.phone = b.guest_phone
+      WHERE g.internal_comment IS NOT NULL AND g.internal_comment != ''
+      ON CONFLICT DO NOTHING
+    `);
 
     console.log('Database initialized successfully');
   } catch (e) {
