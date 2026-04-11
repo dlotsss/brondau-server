@@ -114,6 +114,15 @@ async function runMigrations() {
       ADD COLUMN IF NOT EXISTS deposit_kz TEXT
     `);
 
+    // Migration: Add city field
+    await pool.query(`
+      ALTER TABLE restaurants 
+      ADD COLUMN IF NOT EXISTS city TEXT DEFAULT 'Алмата'
+    `);
+    
+    // Set default city for existing restaurants
+    await pool.query(`UPDATE restaurants SET city = 'Алмата' WHERE city IS NULL`);
+
     console.log('Database initialized successfully');
   } catch (e) {
     console.log('[migration] bookings cancellation migration failed:', e.message);
