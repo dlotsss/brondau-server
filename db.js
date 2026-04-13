@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 
 const { Pool, types } = pg;
 dotenv.config();
-const isLocal = process.env.LOCAL_DB === 'true';
+const isLocal = process.env.LOCAL_DB === 'false';
 
 const user = isLocal ? 'brondau_user' : process.env.DB_USER;
 const password = isLocal ? 'brondau_password' : process.env.DB_PASSWORD;
