@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  brondau_postgres:
+    image: postgres:15-alpine
+    container_name: brondau_local_db
+    environment:
+      POSTGRES_USER: brondau_user
+      POSTGRES_PASSWORD: brondau_password
+      POSTGRES_DB: brondau_local
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
