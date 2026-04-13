@@ -3,13 +3,11 @@ import dotenv from 'dotenv';
 
 const { Pool, types } = pg;
 dotenv.config();
-
-const user = isLocal ? 'brondau_user' : process.env.DB_USER;
-const password = isLocal ? 'brondau_password' : process.env.DB_PASSWORD;
-const host = isLocal ? 'localhost' : process.env.DB_HOST;
-const port = isLocal ? 5432 : process.env.DB_PORT;
-const database = isLocal ? 'brondau_local' : process.env.DB_NAME;
-
+const user = process.env.DB_USER;
+const password = process.env.DB_PASSWORD;
+const host = process.env.DB_HOST;
+const port = process.env.DB_PORT;
+const database = process.env.DB_NAME;
 // Force TIMESTAMP (1114) to be interpreted as UTC string
 types.setTypeParser(1114, (str) => str + 'Z');
 
@@ -19,10 +17,10 @@ const pool = new Pool({
   host: host,
   port: port,
   database: database,
-  ssl: isLocal ? false : {
+  ssl: {
     rejectUnauthorized: false
   },
-  max: isLocal ? 10 : 2,
+  max: 2, // Limit connections per instance for serverless
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
 });
