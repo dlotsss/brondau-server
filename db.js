@@ -25,4 +25,10 @@ const pool = new Pool({
   connectionTimeoutMillis: 2000,
 });
 
+// Пул соединений должен всегда работать в UTC, чтобы TIMESTAMP без часового пояса
+// интерпретировались и записывались корректно вне зависимости от настроек ОС сервера.
+pool.on('connect', (client) => {
+  client.query("SET timezone = 'UTC'").catch(err => console.error('Error setting timezone:', err));
+});
+
 export default pool;

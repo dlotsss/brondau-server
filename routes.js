@@ -406,8 +406,9 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
       }
     }
 
+    const nowUTC = new Date();
     const status = isAdmin ? 'CONFIRMED' : 'PENDING';
-    const deadlineAt = status === 'PENDING' ? calculateDeadline(new Date(), admin_works, timezoneOffset) : null;
+    const deadlineAt = status === 'PENDING' ? calculateDeadline(nowUTC, admin_works, timezoneOffset) : null;
 
     // Upsert guest
     if (normalizedPhone) {
@@ -426,10 +427,10 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     }
 
     const result = await pool.query(`
-      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration, assigned_to, deadline_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration, assigned_to, deadline_at, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       RETURNING *
-    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration, assignedTo || null, deadlineAt]);
+    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration, assignedTo || null, deadlineAt, nowUTC]);
 
     // Auto-save staff name for autocomplete
     if (assignedTo && assignedTo.trim()) {
@@ -850,7 +851,7 @@ router.post('/public/bookings/cancel/:token', async (req, res) => {
 
 router.post('/bookings/cleanup-expired', async (req, res) => {
   try {
-    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '1 hour') < NOW() RETURNING *`);
+    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '1 hour') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
 
     res.json({ updated: result.rows.length, bookings: result.rows });
   } catch (error) {
