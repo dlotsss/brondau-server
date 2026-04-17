@@ -53,6 +53,60 @@ function escapeHtml(s) {
     .replaceAll("'", '&#39;');
 }
 
+function calculateDeadline(now, adminWorks) {
+  // now is a Date object (UTC)
+  // adminWorks is Record<number, {start: string, end: string}>
+  
+  const getShift = (date) => {
+    const day = date.getUTCDay();
+    const sched = adminWorks && adminWorks[day];
+    if (!sched) return null;
+    
+    let [h, m] = sched.start.split(':').map(Number);
+    let [eh, em] = sched.end.split(':').map(Number);
+    
+    let start = new Date(date);
+    start.setUTCHours(h, m, 0, 0);
+    
+    let end = new Date(start);
+    end.setUTCHours(eh, em, 0, 0);
+    if (eh < h || (eh === h && em < m)) {
+      end.setUTCDate(end.getUTCDate() + 1);
+    }
+    return { start, end };
+  };
+
+  // Check today's shift and yesterday's shift (for overnight)
+  const todayShift = getShift(now);
+  const yesterday = new Date(now);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const yestShift = getShift(yesterday);
+
+  // Is "now" inside a shift?
+  if (todayShift && now >= todayShift.start && now < todayShift.end) {
+    const deadline = new Date(now.getTime() + 60 * 60 * 1000);
+    return deadline;
+  }
+  if (yestShift && now >= yestShift.start && now < yestShift.end) {
+    const deadline = new Date(now.getTime() + 60 * 60 * 1000);
+    return deadline;
+  }
+
+  // Not in shift. Find next shift start.
+  // Check next 7 days
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(now);
+    d.setUTCDate(d.getUTCDate() + i);
+    const shift = getShift(d);
+    if (shift && shift.start > now) {
+      return new Date(shift.start.getTime() + 60 * 60 * 1000);
+    }
+  }
+
+  // Fallback: 1 hour from now if no admin works defined
+  return new Date(now.getTime() + 60 * 60 * 1000);
+}
+
 // ============ AUTHENTICATION ============
 
 router.post('/auth/owner', async (req, res) => {
@@ -242,9 +296,9 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     if (!isAdmin && !normalizedPhone) return res.status(400).json({ error: 'Phone number is required' });
     if (!isAdmin && !normalizedEmail) return res.status(400).json({ error: 'Email is required' });
 
-    const restaurantResult = await pool.query('SELECT name, work_starts, work_ends, schedule, with_map, booking_restriction FROM restaurants WHERE id = $1', [restaurantId]);
+    const restaurantResult = await pool.query('SELECT name, work_starts, work_ends, schedule, with_map, booking_restriction, admin_works FROM restaurants WHERE id = $1', [restaurantId]);
     if (restaurantResult.rows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
-    const { name: restaurantName, work_starts, work_ends, schedule, with_map, booking_restriction } = restaurantResult.rows[0];
+    const { name: restaurantName, work_starts, work_ends, schedule, with_map, booking_restriction, admin_works } = restaurantResult.rows[0];
 
     const { duration: requestedDuration } = req.body;
     const bookingDuration = requestedDuration || (booking_restriction !== -1 ? booking_restriction : 60);
@@ -351,6 +405,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     }
 
     const status = isAdmin ? 'CONFIRMED' : 'PENDING';
+    const deadlineAt = status === 'PENDING' ? calculateDeadline(new Date(), admin_works) : null;
 
     // Upsert guest
     if (normalizedPhone) {
@@ -369,10 +424,10 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     }
 
     const result = await pool.query(`
-      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration, assigned_to)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration, assigned_to, deadline_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       RETURNING *
-    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration, assignedTo || null]);
+    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration, assignedTo || null, deadlineAt]);
 
     // Auto-save staff name for autocomplete
     if (assignedTo && assignedTo.trim()) {
@@ -793,7 +848,7 @@ router.post('/public/bookings/cancel/:token', async (req, res) => {
 
 router.post('/bookings/cleanup-expired', async (req, res) => {
   try {
-    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND created_at < NOW() - INTERVAL '1 hour' RETURNING *`);
+    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '1 hour') < NOW() RETURNING *`);
 
     res.json({ updated: result.rows.length, bookings: result.rows });
   } catch (error) {
