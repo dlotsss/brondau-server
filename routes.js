@@ -53,9 +53,9 @@ function escapeHtml(s) {
     .replaceAll("'", '&#39;');
 }
 
-function calculateDeadline(now, adminWorks) {
-  // now is a Date object (UTC)
-  // adminWorks is Record<number, {start: string, end: string}>
+function calculateDeadline(nowUTC, adminWorks, timezoneOffset = -300) {
+  // 1. Convert UTC now to "Local-time-values-in-UTC-object"
+  const now = new Date(nowUTC.getTime() - (timezoneOffset * 60 * 1000));
   
   const getShift = (date) => {
     const day = date.getUTCDay();
@@ -76,35 +76,37 @@ function calculateDeadline(now, adminWorks) {
     return { start, end };
   };
 
-  // Check today's shift and yesterday's shift (for overnight)
-  const todayShift = getShift(now);
-  const yesterday = new Date(now);
-  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-  const yestShift = getShift(yesterday);
+  const _calculate = () => {
+    // Check today's shift and yesterday's shift (for overnight)
+    const todayShift = getShift(now);
+    const yesterday = new Date(now);
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    const yestShift = getShift(yesterday);
 
-  // Is "now" inside a shift?
-  if (todayShift && now >= todayShift.start && now < todayShift.end) {
-    const deadline = new Date(now.getTime() + 60 * 60 * 1000);
-    return deadline;
-  }
-  if (yestShift && now >= yestShift.start && now < yestShift.end) {
-    const deadline = new Date(now.getTime() + 60 * 60 * 1000);
-    return deadline;
-  }
-
-  // Not in shift. Find next shift start.
-  // Check next 7 days
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(now);
-    d.setUTCDate(d.getUTCDate() + i);
-    const shift = getShift(d);
-    if (shift && shift.start > now) {
-      return new Date(shift.start.getTime() + 60 * 60 * 1000);
+    // Is "now" inside a shift?
+    if (todayShift && now >= todayShift.start && now < todayShift.end) {
+      return new Date(now.getTime() + 60 * 60 * 1000);
     }
-  }
+    if (yestShift && now >= yestShift.start && now < yestShift.end) {
+      return new Date(now.getTime() + 60 * 60 * 1000);
+    }
 
-  // Fallback: 1 hour from now if no admin works defined
-  return new Date(now.getTime() + 60 * 60 * 1000);
+    // Not in shift. Find next shift start.
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(now);
+      d.setUTCDate(d.getUTCDate() + i);
+      const shift = getShift(d);
+      if (shift && shift.start > now) {
+        return new Date(shift.start.getTime() + 60 * 60 * 1000);
+      }
+    }
+    return new Date(now.getTime() + 60 * 60 * 1000);
+  };
+
+  const localDeadline = _calculate();
+  
+  // 2. Convert back to UTC
+  return new Date(localDeadline.getTime() + (timezoneOffset * 60 * 1000));
 }
 
 // ============ AUTHENTICATION ============
@@ -405,7 +407,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     }
 
     const status = isAdmin ? 'CONFIRMED' : 'PENDING';
-    const deadlineAt = status === 'PENDING' ? calculateDeadline(new Date(), admin_works) : null;
+    const deadlineAt = status === 'PENDING' ? calculateDeadline(new Date(), admin_works, timezoneOffset) : null;
 
     // Upsert guest
     if (normalizedPhone) {
