@@ -85,10 +85,10 @@ function calculateDeadline(nowUTC, adminWorks, timezoneOffset = -300) {
 
     // Is "now" inside a shift?
     if (todayShift && now >= todayShift.start && now < todayShift.end) {
-      return new Date(now.getTime() + 60 * 60 * 1000);
+      return new Date(now.getTime() + 120 * 60 * 1000);
     }
     if (yestShift && now >= yestShift.start && now < yestShift.end) {
-      return new Date(now.getTime() + 60 * 60 * 1000);
+      return new Date(now.getTime() + 120 * 60 * 1000);
     }
 
     // Not in shift. Find next shift start.
@@ -97,10 +97,10 @@ function calculateDeadline(nowUTC, adminWorks, timezoneOffset = -300) {
       d.setUTCDate(d.getUTCDate() + i);
       const shift = getShift(d);
       if (shift && shift.start > now) {
-        return new Date(shift.start.getTime() + 60 * 60 * 1000);
+        return new Date(shift.start.getTime() + 120 * 60 * 1000);
       }
     }
-    return new Date(now.getTime() + 60 * 60 * 1000);
+    return new Date(now.getTime() + 120 * 60 * 1000);
   };
 
   const localDeadline = _calculate();
@@ -851,7 +851,7 @@ router.post('/public/bookings/cancel/:token', async (req, res) => {
 
 router.post('/bookings/cleanup-expired', async (req, res) => {
   try {
-    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '1 hour') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
+    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '2 hours') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
 
     res.json({ updated: result.rows.length, bookings: result.rows });
   } catch (error) {
