@@ -176,6 +176,12 @@ async function runMigrations() {
     await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS admin_works JSONB`);
     await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deadline_at TIMESTAMP`);
     console.log('[migration] admin_works and deadline_at ensured');
+    // Migration: Add logo_at field
+    await pool.query(`
+      ALTER TABLE restaurants 
+      ADD COLUMN IF NOT EXISTS logo_url TEXT
+    `);
+
   } catch (e) {
     console.log('[migration] telegram_chat_id migration failed:', e.message);
   }

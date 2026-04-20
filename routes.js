@@ -211,8 +211,11 @@ router.post('/restaurants', async (req, res) => {
 
 router.put('/restaurants/:id/layout', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { layout, floors, bookingRestriction, ageRestriction } = req.body;
+    const { 
+      layout, floors, bookingRestriction, ageRestriction,
+      photoUrl, logoUrl, address, city, adminWorks,
+      deposit, ageRestrictionKz, depositKz
+    } = req.body;
     let columns = [];
     let params = [];
     let paramIndex = 1;
@@ -232,6 +235,38 @@ router.put('/restaurants/:id/layout', async (req, res) => {
     if (ageRestriction !== undefined) {
       columns.push(`age_restriction = $${paramIndex++}`);
       params.push(ageRestriction);
+    }
+    if (photoUrl !== undefined) {
+      columns.push(`photo_url = $${paramIndex++}`);
+      params.push(photoUrl);
+    }
+    if (logoUrl !== undefined) {
+      columns.push(`logo_url = $${paramIndex++}`);
+      params.push(logoUrl);
+    }
+    if (address !== undefined) {
+      columns.push(`address = $${paramIndex++}`);
+      params.push(address);
+    }
+    if (city !== undefined) {
+      columns.push(`city = $${paramIndex++}`);
+      params.push(city);
+    }
+    if (adminWorks !== undefined) {
+      columns.push(`admin_works = $${paramIndex++}`);
+      params.push(JSON.stringify(adminWorks));
+    }
+    if (deposit !== undefined) {
+      columns.push(`deposit = $${paramIndex++}`);
+      params.push(deposit);
+    }
+    if (ageRestrictionKz !== undefined) {
+      columns.push(`age_restriction_kz = $${paramIndex++}`);
+      params.push(ageRestrictionKz);
+    }
+    if (depositKz !== undefined) {
+      columns.push(`deposit_kz = $${paramIndex++}`);
+      params.push(depositKz);
     }
 
     if (columns.length === 0) return res.status(400).json({ error: 'No fields to update' });
