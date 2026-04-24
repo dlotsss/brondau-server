@@ -754,12 +754,11 @@ router.put('/bookings/:id/status', async (req, res) => {
             subject: 'Бронирование подтверждено ✅',
             html: `<h2>Ваше бронирование подтверждено!</h2>
 <p><b>Ресторан:</b> ${eName}${eAddr ? ', ' + eAddr : ''}</p>
-<p><b>Стол:</b> ${eTable}</p>
 <p><b>Время:</b> ${escapeHtml(formattedDate)}</p>
 <p><b>Гостей:</b> ${booking.guest_count}</p>
 <p style="margin-top: 20px;">Если ваши планы изменились, вы можете отменить бронь по ссылке ниже:</p>
 <p><a href="${cancelLink}" style="background-color: #e53e3e; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Отменить бронь</a></p>`,
-            text: `Ваше бронирование подтверждено!\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nСтол: ${booking.table_label || 'Ожидает назначения'}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}\n\nЕсли ваши планы изменились, вы можете отменить бронь по этой ссылке: ${cancelLink}`,
+            text: `Ваше бронирование подтверждено!\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}\n\nЕсли ваши планы изменились, вы можете отменить бронь по этой ссылке: ${cancelLink}`,
           });
         } else {
           const reason = declineReason || booking.decline_reason || '';
@@ -771,10 +770,9 @@ router.put('/bookings/:id/status', async (req, res) => {
             subject: subjectText,
             html: `<h2>${headerText}</h2>
 <p><b>Ресторан:</b> ${eName}${eAddr ? ', ' + eAddr : ''}</p>
-<p><b>Стол:</b> ${eTable}</p>
 <p><b>Время:</b> ${escapeHtml(formattedDate)}</p>
 <p><b>Причина:</b> ${escapeHtml(reason || 'Ваше бронирование было отклонено.')}</p>`,
-            text: `${headerText}\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nСтол: ${booking.table_label || 'Ожидает назначения'}\nВремя: ${formattedDate}\nПричина: ${reason || 'Ваше бронирование было отклонено.'}`,
+            text: `${headerText}\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nПричина: ${reason || 'Ваше бронирование было отклонено.'}`,
           });
         }
       } catch (emailErr) { console.error('Email notification error (guest status):', emailErr); }
