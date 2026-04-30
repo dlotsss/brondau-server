@@ -34,6 +34,14 @@ async function runMigrations() {
   }
 
   try {
+    // Add is_active column to restaurants
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
+    console.log('[migration] restaurants.is_active column ensured');
+  } catch (e) {
+    console.log('[migration] is_active column migration skipped:', e.message);
+  }
+
+  try {
     // Create guests table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS guests (

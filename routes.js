@@ -4,6 +4,7 @@ import { Resend } from 'resend';
 import dotenv from 'dotenv';
 import pool from './db.js';
 import { notifyRestaurantAdmins } from './telegram.js';
+import { sendWhatsAppMessage } from './whatsapp.js';
 
 dotenv.config();
 
@@ -151,7 +152,7 @@ router.post('/auth/owner/restaurants', async (req, res) => {
 router.post('/auth/admin/restaurants', async (req, res) => {
   try {
     const { email } = req.body;
-    const result = await pool.query(`SELECT r.id, r.name, r.with_map FROM admins a JOIN restaurants r ON a.restaurant_id = r.id WHERE a.email = $1`, [email]);
+    const result = await pool.query(`SELECT r.id, r.name, r.with_map FROM admins a JOIN restaurants r ON a.restaurant_id = r.id WHERE a.email = $1 AND r.is_active = true`, [email]);
     res.json(result.rows);
   } catch (error) {
     console.error('Get admin restaurants error:', error);
@@ -162,9 +163,10 @@ router.post('/auth/admin/restaurants', async (req, res) => {
 router.post('/auth/admin', async (req, res) => {
   try {
     const { email, password, restaurantId } = req.body;
-    const result = await pool.query('SELECT * FROM admins WHERE email = $1 AND restaurant_id = $2', [email, restaurantId]);
+    const result = await pool.query('SELECT a.*, r.is_active FROM admins a JOIN restaurants r ON a.restaurant_id = r.id WHERE a.email = $1 AND a.restaurant_id = $2', [email, restaurantId]);
     if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
     const admin = result.rows[0];
+    if (admin.is_active === false) return res.status(403).json({ error: 'Restaurant is not active' });
     const validPassword = await bcrypt.compare(password, admin.password_hash);
     if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
     res.json({ id: admin.id, email: admin.email, role: 'ADMIN', restaurantId: admin.restaurant_id });
@@ -178,7 +180,7 @@ router.post('/auth/admin', async (req, res) => {
 
 router.get('/restaurants', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM restaurants ORDER BY name');
+    const result = await pool.query('SELECT * FROM restaurants WHERE is_active = true ORDER BY name');
     res.json(result.rows);
   } catch (error) {
     console.error('Get restaurants error:', error);
@@ -331,7 +333,6 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
     const normalizedEmail = guestEmail?.trim().toLowerCase() || null;
 
     if (!isAdmin && !normalizedPhone) return res.status(400).json({ error: 'Phone number is required' });
-    if (!isAdmin && !normalizedEmail) return res.status(400).json({ error: 'Email is required' });
 
     const restaurantResult = await pool.query('SELECT name, work_starts, work_ends, schedule, with_map, booking_restriction, admin_works FROM restaurants WHERE id = $1', [restaurantId]);
     if (restaurantResult.rows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
@@ -460,12 +461,34 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
         console.error('Failed to upsert guest:', guestErr);
       }
     }
+    const { tableIds: reqTableIds, tableLabels: reqTableLabels } = req.body;
 
-    const result = await pool.query(`
-      INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration, assigned_to, deadline_at, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-      RETURNING *
-    `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration, assignedTo || null, deadlineAt, nowUTC]);
+    const client = await pool.connect();
+    let bookingRow;
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(`
+        INSERT INTO bookings (restaurant_id, table_id, table_label, guest_name, guest_phone, guest_email, guest_count, date_time, status, guest_comment, duration, assigned_to, deadline_at, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        RETURNING *
+      `, [restaurantId, tableId || null, tableLabel || null, guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, status, guestComment || null, bookingDuration, assignedTo || null, deadlineAt, nowUTC]);
+      bookingRow = result.rows[0];
+
+      // Insert into booking_tables if multiple tables provided
+      const finalIds = reqTableIds || (tableId ? [tableId] : []);
+      const finalLabels = reqTableLabels || (tableLabel ? [tableLabel] : []);
+      if (finalIds.length > 0) {
+        const insertValues = finalIds.map((tId, idx) => `('${bookingRow.id}', '${tId}', '${(finalLabels[idx] || '').replace(/'/g, "''")}')`).join(', ');
+        await client.query(`INSERT INTO booking_tables (booking_id, table_id, table_label) VALUES ${insertValues}`);
+      }
+
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
     // Auto-save staff name for autocomplete
     if (assignedTo && assignedTo.trim()) {
@@ -518,23 +541,10 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
         console.error('Telegram notification error:', tgErr);
       }
 
-      try {
-        await sendEmail({
-          to: normalizedEmail,
-          subject: `Запрос на бронирование принят, ${restaurantName}`,
-          html: `<h2>Ваш запрос на бронирование принят</h2>
-<p><b>Стол:</b> ${eTable}</p>
-<p><b>Время:</b> ${escapeHtml(bookingTime)}</p>
-<p><b>Гостей:</b> ${guestCount}</p>
-<p>Вам придёт письмо после решения администратора.</p>`,
-          text: `Ваш запрос на бронирование принят\nСтол: ${tableLabel || 'Ожидает назначения'}\nВремя: ${bookingTime}\nГостей: ${guestCount}\nВам придёт письмо после решения администратора.`,
-        });
-      } catch (emailErr) {
-        console.error('Email notification error (guest):', emailErr);
-      }
+      // Гостевое уведомление "В обработке" было удалено по требованию
     }
 
-    res.json(result.rows[0]);
+    res.json(bookingRow);
   } catch (error) {
     console.error('Create booking error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -737,7 +747,7 @@ router.put('/bookings/:id/status', async (req, res) => {
     }
     const savedStatus = String(booking?.status || '').toUpperCase();
 
-    if (booking && (savedStatus === 'CONFIRMED' || savedStatus === 'DECLINED') && booking.guest_email) {
+    if (booking && (savedStatus === 'CONFIRMED' || savedStatus === 'DECLINED') && booking.guest_phone) {
       try {
         const formattedDate = formatBookingDate(booking.date_time, null);
         const eTable = escapeHtml(booking.table_label || 'Не назначен');
@@ -749,33 +759,24 @@ router.put('/bookings/:id/status', async (req, res) => {
         if (savedStatus === 'CONFIRMED') {
           const origin = req.get('Origin') || (req.get('Referrer') ? new URL(req.get('Referrer')).origin : 'http://localhost:5173');
           const cancelLink = `${process.env.FRONTEND_URL || origin}/#/cancel-booking/${booking.cancellation_token}`;
-          await sendEmail({
-            to: booking.guest_email,
-            subject: 'Бронирование подтверждено ✅',
-            html: `<h2>Ваше бронирование подтверждено!</h2>
-<p><b>Ресторан:</b> ${eName}${eAddr ? ', ' + eAddr : ''}</p>
-<p><b>Время:</b> ${escapeHtml(formattedDate)}</p>
-<p><b>Гостей:</b> ${booking.guest_count}</p>
-<p style="margin-top: 20px;">Если ваши планы изменились, вы можете отменить бронь по ссылке ниже:</p>
-<p><a href="${cancelLink}" style="background-color: #e53e3e; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Отменить бронь</a></p>`,
-            text: `Ваше бронирование подтверждено!\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}\n\nЕсли ваши планы изменились, вы можете отменить бронь по этой ссылке: ${cancelLink}`,
-          });
+          
+          if (booking.guest_phone) {
+             const waText = `✅ Ваше бронирование подтверждено!\n\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}\n\nЕсли ваши планы изменились, вы можете отменить бронь по ссылке: ${cancelLink}`;
+             await sendWhatsAppMessage(booking.guest_phone, waText);
+          }
+
         } else {
           const reason = declineReason || booking.decline_reason || '';
           const isCancelled = reason === 'Отменено администратором';
-          const subjectText = isCancelled ? 'Бронирование отменено ❌' : 'Бронирование отклонено ❌';
           const headerText = isCancelled ? 'Ваше бронирование отменено' : 'Ваше бронирование отклонено';
-          await sendEmail({
-            to: booking.guest_email,
-            subject: subjectText,
-            html: `<h2>${headerText}</h2>
-<p><b>Ресторан:</b> ${eName}${eAddr ? ', ' + eAddr : ''}</p>
-<p><b>Время:</b> ${escapeHtml(formattedDate)}</p>
-<p><b>Причина:</b> ${escapeHtml(reason || 'Ваше бронирование было отклонено.')}</p>`,
-            text: `${headerText}\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nПричина: ${reason || 'Ваше бронирование было отклонено.'}`,
-          });
+          const textBody = `${headerText}\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nПричина: ${reason || 'Ваше бронирование было отклонено.'}`;
+          
+          if (booking.guest_phone) {
+             const waText = `❌ ${textBody}`;
+             await sendWhatsAppMessage(booking.guest_phone, waText);
+          }
         }
-      } catch (emailErr) { console.error('Email notification error (guest status):', emailErr); }
+      } catch (notifyErr) { console.error('Notification error (guest status):', notifyErr); }
     }
     res.json(booking);
   } catch (error) { console.error('Update booking status error:', error); res.status(500).json({ error: 'Server error' }); }
