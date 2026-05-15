@@ -586,7 +586,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
 router.put('/bookings/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { guestName, guestPhone, guestEmail, guestCount, dateTime, tableId, tableLabel, guestComment, duration, assignedTo } = req.body;
+    const { guestName, guestPhone, guestEmail, guestCount, dateTime, tableId, tableLabel, guestComment, duration, assignedTo, tableIds, tableLabels } = req.body;
 
     const bookingRes = await pool.query('SELECT restaurant_id, status FROM bookings WHERE id = $1', [id]);
     if (bookingRes.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
@@ -598,9 +598,11 @@ router.put('/bookings/:id', async (req, res) => {
 
     const bookingDuration = duration || (restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60);
 
+    const finalTableIds = tableIds || (tableId ? [tableId] : []);
+    const finalTableLabels = tableLabels || (tableLabel ? [tableLabel] : []);
+
     if (['PENDING', 'CONFIRMED', 'OCCUPIED'].includes(status)) {
-        const checkIds = tableId ? [tableId] : [];
-        if (checkIds.length > 0) {
+        if (finalTableIds.length > 0) {
             const conflictResult = await pool.query(
               `SELECT b.id FROM bookings b
                LEFT JOIN booking_tables bt ON b.id = bt.booking_id
@@ -610,7 +612,7 @@ router.put('/bookings/:id', async (req, res) => {
                AND (b.table_id = ANY($2) OR bt.table_id = ANY($2))
                AND (b.date_time, (COALESCE(b.duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
                LIMIT 1`,
-              [restaurant_id, checkIds, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
+              [restaurant_id, finalTableIds, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
             );
 
             if (conflictResult.rows.length > 0) {
@@ -637,34 +639,55 @@ router.put('/bookings/:id', async (req, res) => {
       }
     }
 
-    const updateQuery = `
-      UPDATE bookings SET
-        guest_name = $1,
-        guest_phone = $2,
-        guest_email = $3,
-        guest_count = $4,
-        date_time = $5,
-        table_id = $6,
-        table_label = $7,
-        guest_comment = $8,
-        duration = $9,
-        assigned_to = $10
-      WHERE id = $11
-      RETURNING *
-    `;
+    const client = await pool.connect();
+    let bookingRow;
+    try {
+      await client.query('BEGIN');
+      
+      const updateQuery = `
+        UPDATE bookings SET
+          guest_name = $1,
+          guest_phone = $2,
+          guest_email = $3,
+          guest_count = $4,
+          date_time = $5,
+          table_id = $6,
+          table_label = $7,
+          guest_comment = $8,
+          duration = $9,
+          assigned_to = $10
+        WHERE id = $11
+        RETURNING *
+      `;
 
-    const result = await pool.query(updateQuery, [
-      guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, tableId || null, tableLabel || null, guestComment || null, bookingDuration, assignedTo || null, id
-    ]);
+      const result = await client.query(updateQuery, [
+        guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, finalTableIds[0] || null, finalTableLabels[0] || null, guestComment || null, bookingDuration, assignedTo || null, id
+      ]);
+      bookingRow = result.rows[0];
 
-    if (assignedTo && assignedTo.trim()) {
-      pool.query(
-        `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
-        [restaurant_id, assignedTo.trim()]
-      ).catch(() => {});
+      // Sync booking_tables
+      await client.query('DELETE FROM booking_tables WHERE booking_id = $1', [id]);
+      if (finalTableIds.length > 0) {
+        const insertValues = finalTableIds.map((tId, idx) => `('${id}', '${tId}', '${(finalTableLabels[idx] || '').replace(/'/g, "''")}')`).join(', ');
+        await client.query(`INSERT INTO booking_tables (booking_id, table_id, table_label) VALUES ${insertValues}`);
+      }
+
+      await client.query('COMMIT');
+
+      if (assignedTo && assignedTo.trim()) {
+        pool.query(
+          `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
+          [restaurant_id, assignedTo.trim()]
+        ).catch(() => {});
+      }
+
+      res.json(bookingRow);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-
-    res.json(result.rows[0]);
   } catch (error) {
     console.error('Update booking details error:', error);
     res.status(500).json({ error: 'Server error' });
