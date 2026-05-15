@@ -442,6 +442,38 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
       }
     }
 
+    // Admin table conflict check — separate from guest logic above
+    if (isAdmin) {
+      const { tableIds: reqTableIds } = req.body;
+      const adminCheckIds = reqTableIds || (tableId ? [tableId] : []);
+      if (adminCheckIds.length > 0) {
+        const conflictQuery = `
+          SELECT b.id 
+          FROM bookings b
+          LEFT JOIN booking_tables bt ON b.id = bt.booking_id
+          WHERE b.restaurant_id = $1
+            AND b.status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+            AND (b.table_id = ANY($2) OR bt.table_id = ANY($2))
+            AND (
+              b.date_time, 
+              (COALESCE(b.duration, $3) || ' minutes')::interval
+            ) OVERLAPS (
+              $4::timestamp, 
+              ($5 || ' minutes')::interval
+            )
+          LIMIT 1
+        `;
+        const overlaps = await pool.query(conflictQuery, [
+          restaurantId, adminCheckIds,
+          booking_restriction !== -1 ? booking_restriction : 60,
+          dateTime, bookingDuration
+        ]);
+        if (overlaps.rows.length > 0) {
+          return res.status(409).json({ error: 'Один или несколько выбранных столов уже заняты на это время.' });
+        }
+      }
+    }
+
     const nowUTC = new Date();
     const status = isAdmin ? 'CONFIRMED' : 'PENDING';
     const deadlineAt = status === 'PENDING' ? calculateDeadline(nowUTC, admin_works, timezoneOffset) : null;
@@ -567,15 +599,18 @@ router.put('/bookings/:id', async (req, res) => {
     const bookingDuration = duration || (restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60);
 
     if (['PENDING', 'CONFIRMED', 'OCCUPIED'].includes(status)) {
-        if (restaurant.with_map !== false && tableId) {
+        const checkIds = tableId ? [tableId] : [];
+        if (checkIds.length > 0) {
             const conflictResult = await pool.query(
-              `SELECT id FROM bookings 
-               WHERE restaurant_id = $1 AND table_id = $2 
-               AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
-               AND id != $6
-               AND (date_time, (COALESCE(duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
+              `SELECT b.id FROM bookings b
+               LEFT JOIN booking_tables bt ON b.id = bt.booking_id
+               WHERE b.restaurant_id = $1
+               AND b.status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+               AND b.id != $6
+               AND (b.table_id = ANY($2) OR bt.table_id = ANY($2))
+               AND (b.date_time, (COALESCE(b.duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
                LIMIT 1`,
-              [restaurant_id, tableId, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
+              [restaurant_id, checkIds, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
             );
 
             if (conflictResult.rows.length > 0) {
