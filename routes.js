@@ -920,9 +920,21 @@ router.post('/public/bookings/cancel/:token', async (req, res) => {
 
 router.post('/bookings/cleanup-expired', async (req, res) => {
   try {
-    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '2 hours') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
+    // 1. Cancel PENDING bookings past their deadline
+    const pendingResult = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '2 hours') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
 
-    res.json({ updated: result.rows.length, bookings: result.rows });
+    // 2. Auto-complete CONFIRMED/OCCUPIED bookings whose duration has passed
+    const completedResult = await pool.query(`
+      UPDATE bookings SET status = 'COMPLETED'
+      WHERE status IN ('CONFIRMED', 'OCCUPIED')
+        AND date_time + (COALESCE(duration, 120) || ' minutes')::interval < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+      RETURNING *
+    `);
+
+    res.json({ 
+      updated: pendingResult.rows.length + completedResult.rows.length, 
+      bookings: [...pendingResult.rows, ...completedResult.rows] 
+    });
   } catch (error) {
     console.error('Cleanup error:', error);
     res.status(500).json({ error: 'Server error' });
