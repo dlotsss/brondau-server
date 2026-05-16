@@ -57,18 +57,18 @@ function escapeHtml(s) {
 function calculateDeadline(nowUTC, adminWorks, timezoneOffset = -300) {
   // 1. Convert UTC now to "Local-time-values-in-UTC-object"
   const now = new Date(nowUTC.getTime() - (timezoneOffset * 60 * 1000));
-  
+
   const getShift = (date) => {
     const day = date.getUTCDay();
     const sched = adminWorks && adminWorks[day];
     if (!sched) return null;
-    
+
     let [h, m] = sched.start.split(':').map(Number);
     let [eh, em] = sched.end.split(':').map(Number);
-    
+
     let start = new Date(date);
     start.setUTCHours(h, m, 0, 0);
-    
+
     let end = new Date(start);
     end.setUTCHours(eh, em, 0, 0);
     if (eh < h || (eh === h && em < m)) {
@@ -105,7 +105,7 @@ function calculateDeadline(nowUTC, adminWorks, timezoneOffset = -300) {
   };
 
   const localDeadline = _calculate();
-  
+
   // 2. Convert back to UTC
   return new Date(localDeadline.getTime() + (timezoneOffset * 60 * 1000));
 }
@@ -213,7 +213,7 @@ router.post('/restaurants', async (req, res) => {
 
 router.put('/restaurants/:id/layout', async (req, res) => {
   try {
-    const { 
+    const {
       layout, floors, bookingRestriction, ageRestriction,
       photoUrl, logoUrl, address, city, adminWorks,
       deposit, ageRestrictionKz, depositKz
@@ -390,7 +390,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
 
       const now = new Date();
       if (timezoneOffset !== undefined) {
-          now.setMinutes(now.getMinutes() - timezoneOffset);
+        now.setMinutes(now.getMinutes() - timezoneOffset);
       }
       const minBookingTime = new Date(now.getTime() + 60 * 60 * 1000);
       if (validationDate < minBookingTime) return res.status(400).json({ error: 'Бронирование доступно минимум за 1 час до начала.' });
@@ -438,6 +438,38 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
         const overlapCount = parseInt(countResult.rows[0]?.overlap_count || 0);
         if (overlapCount >= totalTables) {
           return res.status(409).json({ error: 'К сожалению, на это время все столики уже забронированы.' });
+        }
+      }
+    }
+
+    // Admin table conflict check — separate from guest logic above
+    if (isAdmin) {
+      const { tableIds: reqTableIds } = req.body;
+      const adminCheckIds = reqTableIds || (tableId ? [tableId] : []);
+      if (adminCheckIds.length > 0) {
+        const conflictQuery = `
+          SELECT b.id 
+          FROM bookings b
+          LEFT JOIN booking_tables bt ON b.id = bt.booking_id
+          WHERE b.restaurant_id = $1
+            AND b.status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+            AND (b.table_id = ANY($2) OR bt.table_id = ANY($2))
+            AND (
+              b.date_time, 
+              (COALESCE(b.duration, $3) || ' minutes')::interval
+            ) OVERLAPS (
+              $4::timestamp, 
+              ($5 || ' minutes')::interval
+            )
+          LIMIT 1
+        `;
+        const overlaps = await pool.query(conflictQuery, [
+          restaurantId, adminCheckIds,
+          booking_restriction !== -1 ? booking_restriction : 60,
+          dateTime, bookingDuration
+        ]);
+        if (overlaps.rows.length > 0) {
+          return res.status(409).json({ error: 'Один или несколько выбранных столов уже заняты на это время.' });
         }
       }
     }
@@ -495,7 +527,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
       pool.query(
         `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
         [restaurantId, assignedTo.trim()]
-      ).catch(() => {});
+      ).catch(() => { });
     }
 
     if (!isAdmin) {
@@ -554,7 +586,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
 router.put('/bookings/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { guestName, guestPhone, guestEmail, guestCount, dateTime, tableId, tableLabel, guestComment, duration, assignedTo } = req.body;
+    const { guestName, guestPhone, guestEmail, guestCount, dateTime, tableId, tableLabel, guestComment, duration, assignedTo, tableIds, tableLabels } = req.body;
 
     const bookingRes = await pool.query('SELECT restaurant_id, status FROM bookings WHERE id = $1', [id]);
     if (bookingRes.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
@@ -566,22 +598,27 @@ router.put('/bookings/:id', async (req, res) => {
 
     const bookingDuration = duration || (restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60);
 
-    if (['PENDING', 'CONFIRMED', 'OCCUPIED'].includes(status)) {
-        if (restaurant.with_map !== false && tableId) {
-            const conflictResult = await pool.query(
-              `SELECT id FROM bookings 
-               WHERE restaurant_id = $1 AND table_id = $2 
-               AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
-               AND id != $6
-               AND (date_time, (COALESCE(duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
-               LIMIT 1`,
-              [restaurant_id, tableId, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
-            );
+    const finalTableIds = tableIds || (tableId ? [tableId] : []);
+    const finalTableLabels = tableLabels || (tableLabel ? [tableLabel] : []);
 
-            if (conflictResult.rows.length > 0) {
-              return res.status(409).json({ error: 'Этот столик уже занят в выбранное время или рядом с ним.' });
-            }
+    if (['PENDING', 'CONFIRMED', 'OCCUPIED'].includes(status)) {
+      if (finalTableIds.length > 0) {
+        const conflictResult = await pool.query(
+          `SELECT b.id FROM bookings b
+               LEFT JOIN booking_tables bt ON b.id = bt.booking_id
+               WHERE b.restaurant_id = $1
+               AND b.status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+               AND b.id != $6
+               AND (b.table_id = ANY($2) OR bt.table_id = ANY($2))
+               AND (b.date_time, (COALESCE(b.duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
+               LIMIT 1`,
+          [restaurant_id, finalTableIds, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
+        );
+
+        if (conflictResult.rows.length > 0) {
+          return res.status(409).json({ error: 'Этот столик уже занят в выбранное время или рядом с ним.' });
         }
+      }
     }
 
     const normalizedPhone = String(guestPhone || '').replace(/\D/g, '');
@@ -602,34 +639,55 @@ router.put('/bookings/:id', async (req, res) => {
       }
     }
 
-    const updateQuery = `
-      UPDATE bookings SET
-        guest_name = $1,
-        guest_phone = $2,
-        guest_email = $3,
-        guest_count = $4,
-        date_time = $5,
-        table_id = $6,
-        table_label = $7,
-        guest_comment = $8,
-        duration = $9,
-        assigned_to = $10
-      WHERE id = $11
-      RETURNING *
-    `;
+    const client = await pool.connect();
+    let bookingRow;
+    try {
+      await client.query('BEGIN');
 
-    const result = await pool.query(updateQuery, [
-      guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, tableId || null, tableLabel || null, guestComment || null, bookingDuration, assignedTo || null, id
-    ]);
+      const updateQuery = `
+        UPDATE bookings SET
+          guest_name = $1,
+          guest_phone = $2,
+          guest_email = $3,
+          guest_count = $4,
+          date_time = $5,
+          table_id = $6,
+          table_label = $7,
+          guest_comment = $8,
+          duration = $9,
+          assigned_to = $10
+        WHERE id = $11
+        RETURNING *
+      `;
 
-    if (assignedTo && assignedTo.trim()) {
-      pool.query(
-        `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
-        [restaurant_id, assignedTo.trim()]
-      ).catch(() => {});
+      const result = await client.query(updateQuery, [
+        guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, finalTableIds[0] || null, finalTableLabels[0] || null, guestComment || null, bookingDuration, assignedTo || null, id
+      ]);
+      bookingRow = result.rows[0];
+
+      // Sync booking_tables
+      await client.query('DELETE FROM booking_tables WHERE booking_id = $1', [id]);
+      if (finalTableIds.length > 0) {
+        const insertValues = finalTableIds.map((tId, idx) => `('${id}', '${tId}', '${(finalTableLabels[idx] || '').replace(/'/g, "''")}')`).join(', ');
+        await client.query(`INSERT INTO booking_tables (booking_id, table_id, table_label) VALUES ${insertValues}`);
+      }
+
+      await client.query('COMMIT');
+
+      if (assignedTo && assignedTo.trim()) {
+        pool.query(
+          `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
+          [restaurant_id, assignedTo.trim()]
+        ).catch(() => { });
+      }
+
+      res.json(bookingRow);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-
-    res.json(result.rows[0]);
   } catch (error) {
     console.error('Update booking details error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -645,23 +703,23 @@ router.put('/bookings/:id/status', async (req, res) => {
     const finalTableLabels = tableLabels || (tableLabel ? [tableLabel] : []);
 
     if (status === 'CONFIRMED' && finalTableIds.length > 0) {
-       const bookingRes = await pool.query('SELECT restaurant_id, date_time, duration, guest_count FROM bookings WHERE id = $1', [id]);
-       if (bookingRes.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
-       const { restaurant_id, date_time, duration: currentDuration, guest_count } = bookingRes.rows[0];
-       
-       const restaurantRes = await pool.query('SELECT layout, booking_restriction FROM restaurants WHERE id = $1', [restaurant_id]);
-       const { layout, booking_restriction } = restaurantRes.rows[0];
-       
-       const selectedTables = (layout || []).filter(el => el.type === 'table' && finalTableIds.includes(el.id));
-       const totalSeats = selectedTables.reduce((sum, t) => sum + (t.seats || 2), 0);
-       
-       if (totalSeats > 0 && totalSeats < guest_count) {
-           return res.status(400).json({ error: `Суммарной вместимости столов (${totalSeats}) недостаточно для ${guest_count} гостей` });
-       }
-       
-       const bDuration = duration !== undefined ? duration : (currentDuration || (booking_restriction !== -1 ? booking_restriction : 60));
-       
-       const conflictQuery = `
+      const bookingRes = await pool.query('SELECT restaurant_id, date_time, duration, guest_count FROM bookings WHERE id = $1', [id]);
+      if (bookingRes.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
+      const { restaurant_id, date_time, duration: currentDuration, guest_count } = bookingRes.rows[0];
+
+      const restaurantRes = await pool.query('SELECT layout, booking_restriction FROM restaurants WHERE id = $1', [restaurant_id]);
+      const { layout, booking_restriction } = restaurantRes.rows[0];
+
+      const selectedTables = (layout || []).filter(el => el.type === 'table' && finalTableIds.includes(el.id));
+      const totalSeats = selectedTables.reduce((sum, t) => sum + (t.seats || 2), 0);
+
+      if (totalSeats > 0 && totalSeats < guest_count) {
+        return res.status(400).json({ error: `Суммарной вместимости столов (${totalSeats}) недостаточно для ${guest_count} гостей` });
+      }
+
+      const bDuration = duration !== undefined ? duration : (currentDuration || (booking_restriction !== -1 ? booking_restriction : 60));
+
+      const conflictQuery = `
          SELECT b.id 
          FROM bookings b
          LEFT JOIN booking_tables bt ON b.id = bt.booking_id
@@ -678,15 +736,15 @@ router.put('/bookings/:id/status', async (req, res) => {
            )
          LIMIT 1
        `;
-       const overlaps = await pool.query(conflictQuery, [
-         restaurant_id, finalTableIds, id, 
-         booking_restriction !== -1 ? booking_restriction : 60,
-         date_time, bDuration
-       ]);
-       
-       if (overlaps.rows.length > 0) {
-           return res.status(409).json({ error: 'Один или несколько выбранных столов уже заняты на это время.' });
-       }
+      const overlaps = await pool.query(conflictQuery, [
+        restaurant_id, finalTableIds, id,
+        booking_restriction !== -1 ? booking_restriction : 60,
+        date_time, bDuration
+      ]);
+
+      if (overlaps.rows.length > 0) {
+        return res.status(409).json({ error: 'Один или несколько выбранных столов уже заняты на это время.' });
+      }
     }
 
     const legacyTableId = finalTableIds.length > 0 ? finalTableIds[0] : null;
@@ -721,15 +779,15 @@ router.put('/bookings/:id/status', async (req, res) => {
       await client.query('BEGIN');
       const result = await client.query(query, params);
       booking = result.rows[0];
-      
+
       if (finalTableIds.length > 0 || tableId === null || (tableIds && tableIds.length === 0)) {
-          await client.query('DELETE FROM booking_tables WHERE booking_id = $1', [id]);
-          if (finalTableIds.length > 0) {
-              const insertValues = finalTableIds.map((tId, idx) => `('${id}', '${tId}', '${(finalTableLabels[idx] || '').replace(/'/g, "''")}')`).join(', ');
-              await client.query(`INSERT INTO booking_tables (booking_id, table_id, table_label) VALUES ${insertValues}`);
-          }
+        await client.query('DELETE FROM booking_tables WHERE booking_id = $1', [id]);
+        if (finalTableIds.length > 0) {
+          const insertValues = finalTableIds.map((tId, idx) => `('${id}', '${tId}', '${(finalTableLabels[idx] || '').replace(/'/g, "''")}')`).join(', ');
+          await client.query(`INSERT INTO booking_tables (booking_id, table_id, table_label) VALUES ${insertValues}`);
+        }
       }
-      
+
       await client.query('COMMIT');
 
       // Auto-save staff name for autocomplete
@@ -737,7 +795,7 @@ router.put('/bookings/:id/status', async (req, res) => {
         pool.query(
           `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
           [booking.restaurant_id, assignedTo.trim()]
-        ).catch(() => {});
+        ).catch(() => { });
       }
     } catch (e) {
       await client.query('ROLLBACK');
@@ -759,10 +817,10 @@ router.put('/bookings/:id/status', async (req, res) => {
         if (savedStatus === 'CONFIRMED') {
           const origin = req.get('Origin') || (req.get('Referrer') ? new URL(req.get('Referrer')).origin : 'http://localhost:5173');
           const cancelLink = `${process.env.FRONTEND_URL || origin}/#/cancel-booking/${booking.cancellation_token}`;
-          
+
           if (booking.guest_phone) {
-             const waText = `✅ Ваше бронирование подтверждено!\n\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}\n\nЕсли ваши планы изменились, вы можете отменить бронь по ссылке: ${cancelLink}`;
-             await sendWhatsAppMessage(booking.guest_phone, waText);
+            const waText = `✅ Ваше бронирование подтверждено!\n\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nГостей: ${booking.guest_count}\n\nЕсли ваши планы изменились, вы можете отменить бронь по ссылке: ${cancelLink}`;
+            await sendWhatsAppMessage(booking.guest_phone, waText);
           }
 
         } else {
@@ -770,10 +828,10 @@ router.put('/bookings/:id/status', async (req, res) => {
           const isCancelled = reason === 'Отменено администратором';
           const headerText = isCancelled ? 'Ваше бронирование отменено' : 'Ваше бронирование отклонено';
           const textBody = `${headerText}\nРесторан: ${rest?.name || ''}${rest?.address ? ', ' + rest.address : ''}\nВремя: ${formattedDate}\nПричина: ${reason || 'Ваше бронирование было отклонено.'}`;
-          
+
           if (booking.guest_phone) {
-             const waText = `❌ ${textBody}`;
-             await sendWhatsAppMessage(booking.guest_phone, waText);
+            const waText = `❌ ${textBody}`;
+            await sendWhatsAppMessage(booking.guest_phone, waText);
           }
         }
       } catch (notifyErr) { console.error('Notification error (guest status):', notifyErr); }
@@ -885,9 +943,21 @@ router.post('/public/bookings/cancel/:token', async (req, res) => {
 
 router.post('/bookings/cleanup-expired', async (req, res) => {
   try {
-    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '2 hours') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
+    // 1. Cancel PENDING bookings past their deadline
+    const pendingResult = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '2 hours') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
 
-    res.json({ updated: result.rows.length, bookings: result.rows });
+    // 2. Auto-complete CONFIRMED/OCCUPIED bookings whose duration has passed
+    const completedResult = await pool.query(`
+      UPDATE bookings SET status = 'COMPLETED'
+      WHERE status IN ('CONFIRMED', 'OCCUPIED')
+        AND date_time + (COALESCE(duration, 120) || ' minutes')::interval < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+      RETURNING *
+    `);
+
+    res.json({
+      updated: pendingResult.rows.length + completedResult.rows.length,
+      bookings: [...pendingResult.rows, ...completedResult.rows]
+    });
   } catch (error) {
     console.error('Cleanup error:', error);
     res.status(500).json({ error: 'Server error' });
