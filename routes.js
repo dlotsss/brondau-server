@@ -442,38 +442,6 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
       }
     }
 
-    // Admin table conflict check — separate from guest logic above
-    if (isAdmin) {
-      const { tableIds: reqTableIds } = req.body;
-      const adminCheckIds = reqTableIds || (tableId ? [tableId] : []);
-      if (adminCheckIds.length > 0) {
-        const conflictQuery = `
-          SELECT b.id 
-          FROM bookings b
-          LEFT JOIN booking_tables bt ON b.id = bt.booking_id
-          WHERE b.restaurant_id = $1
-            AND b.status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
-            AND (b.table_id = ANY($2) OR bt.table_id = ANY($2))
-            AND (
-              b.date_time, 
-              (COALESCE(b.duration, $3) || ' minutes')::interval
-            ) OVERLAPS (
-              $4::timestamp, 
-              ($5 || ' minutes')::interval
-            )
-          LIMIT 1
-        `;
-        const overlaps = await pool.query(conflictQuery, [
-          restaurantId, adminCheckIds,
-          booking_restriction !== -1 ? booking_restriction : 60,
-          dateTime, bookingDuration
-        ]);
-        if (overlaps.rows.length > 0) {
-          return res.status(409).json({ error: 'Один или несколько выбранных столов уже заняты на это время.' });
-        }
-      }
-    }
-
     const nowUTC = new Date();
     const status = isAdmin ? 'CONFIRMED' : 'PENDING';
     const deadlineAt = status === 'PENDING' ? calculateDeadline(nowUTC, admin_works, timezoneOffset) : null;
@@ -586,7 +554,7 @@ router.post('/restaurants/:restaurantId/bookings', async (req, res) => {
 router.put('/bookings/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { guestName, guestPhone, guestEmail, guestCount, dateTime, tableId, tableLabel, guestComment, duration, assignedTo, tableIds, tableLabels } = req.body;
+    const { guestName, guestPhone, guestEmail, guestCount, dateTime, tableId, tableLabel, guestComment, duration, assignedTo } = req.body;
 
     const bookingRes = await pool.query('SELECT restaurant_id, status FROM bookings WHERE id = $1', [id]);
     if (bookingRes.rows.length === 0) return res.status(404).json({ error: 'Booking not found' });
@@ -598,21 +566,16 @@ router.put('/bookings/:id', async (req, res) => {
 
     const bookingDuration = duration || (restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60);
 
-    const finalTableIds = tableIds || (tableId ? [tableId] : []);
-    const finalTableLabels = tableLabels || (tableLabel ? [tableLabel] : []);
-
     if (['PENDING', 'CONFIRMED', 'OCCUPIED'].includes(status)) {
-        if (finalTableIds.length > 0) {
+        if (restaurant.with_map !== false && tableId) {
             const conflictResult = await pool.query(
-              `SELECT b.id FROM bookings b
-               LEFT JOIN booking_tables bt ON b.id = bt.booking_id
-               WHERE b.restaurant_id = $1
-               AND b.status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
-               AND b.id != $6
-               AND (b.table_id = ANY($2) OR bt.table_id = ANY($2))
-               AND (b.date_time, (COALESCE(b.duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
+              `SELECT id FROM bookings 
+               WHERE restaurant_id = $1 AND table_id = $2 
+               AND status IN ('PENDING', 'CONFIRMED', 'OCCUPIED')
+               AND id != $6
+               AND (date_time, (COALESCE(duration, $3) || ' minutes')::interval) OVERLAPS ($4, ($5 || ' minutes')::interval)
                LIMIT 1`,
-              [restaurant_id, finalTableIds, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
+              [restaurant_id, tableId, restaurant.booking_restriction !== -1 ? restaurant.booking_restriction : 60, dateTime, bookingDuration, id]
             );
 
             if (conflictResult.rows.length > 0) {
@@ -639,55 +602,34 @@ router.put('/bookings/:id', async (req, res) => {
       }
     }
 
-    const client = await pool.connect();
-    let bookingRow;
-    try {
-      await client.query('BEGIN');
-      
-      const updateQuery = `
-        UPDATE bookings SET
-          guest_name = $1,
-          guest_phone = $2,
-          guest_email = $3,
-          guest_count = $4,
-          date_time = $5,
-          table_id = $6,
-          table_label = $7,
-          guest_comment = $8,
-          duration = $9,
-          assigned_to = $10
-        WHERE id = $11
-        RETURNING *
-      `;
+    const updateQuery = `
+      UPDATE bookings SET
+        guest_name = $1,
+        guest_phone = $2,
+        guest_email = $3,
+        guest_count = $4,
+        date_time = $5,
+        table_id = $6,
+        table_label = $7,
+        guest_comment = $8,
+        duration = $9,
+        assigned_to = $10
+      WHERE id = $11
+      RETURNING *
+    `;
 
-      const result = await client.query(updateQuery, [
-        guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, finalTableIds[0] || null, finalTableLabels[0] || null, guestComment || null, bookingDuration, assignedTo || null, id
-      ]);
-      bookingRow = result.rows[0];
+    const result = await pool.query(updateQuery, [
+      guestName, normalizedPhone, normalizedEmail, guestCount, dateTime, tableId || null, tableLabel || null, guestComment || null, bookingDuration, assignedTo || null, id
+    ]);
 
-      // Sync booking_tables
-      await client.query('DELETE FROM booking_tables WHERE booking_id = $1', [id]);
-      if (finalTableIds.length > 0) {
-        const insertValues = finalTableIds.map((tId, idx) => `('${id}', '${tId}', '${(finalTableLabels[idx] || '').replace(/'/g, "''")}')`).join(', ');
-        await client.query(`INSERT INTO booking_tables (booking_id, table_id, table_label) VALUES ${insertValues}`);
-      }
-
-      await client.query('COMMIT');
-
-      if (assignedTo && assignedTo.trim()) {
-        pool.query(
-          `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
-          [restaurant_id, assignedTo.trim()]
-        ).catch(() => {});
-      }
-
-      res.json(bookingRow);
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
+    if (assignedTo && assignedTo.trim()) {
+      pool.query(
+        `INSERT INTO staff_names (restaurant_id, name) VALUES ($1, $2) ON CONFLICT (restaurant_id, name) DO NOTHING`,
+        [restaurant_id, assignedTo.trim()]
+      ).catch(() => {});
     }
+
+    res.json(result.rows[0]);
   } catch (error) {
     console.error('Update booking details error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -943,21 +885,9 @@ router.post('/public/bookings/cancel/:token', async (req, res) => {
 
 router.post('/bookings/cleanup-expired', async (req, res) => {
   try {
-    // 1. Cancel PENDING bookings past their deadline
-    const pendingResult = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '2 hours') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
+    const result = await pool.query(`UPDATE bookings SET status = 'DECLINED', decline_reason = 'Automatic cancellation' WHERE status = 'PENDING' AND COALESCE(deadline_at, created_at + INTERVAL '2 hours') < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') RETURNING *`);
 
-    // 2. Auto-complete CONFIRMED/OCCUPIED bookings whose duration has passed
-    const completedResult = await pool.query(`
-      UPDATE bookings SET status = 'COMPLETED'
-      WHERE status IN ('CONFIRMED', 'OCCUPIED')
-        AND date_time + (COALESCE(duration, 120) || ' minutes')::interval < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
-      RETURNING *
-    `);
-
-    res.json({ 
-      updated: pendingResult.rows.length + completedResult.rows.length, 
-      bookings: [...pendingResult.rows, ...completedResult.rows] 
-    });
+    res.json({ updated: result.rows.length, bookings: result.rows });
   } catch (error) {
     console.error('Cleanup error:', error);
     res.status(500).json({ error: 'Server error' });
