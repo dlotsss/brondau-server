@@ -184,6 +184,14 @@ async function runMigrations() {
     await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS admin_works JSONB`);
     await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deadline_at TIMESTAMP`);
     console.log('[migration] admin_works and deadline_at ensured');
+
+    try {
+      await pool.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS manager_name VARCHAR(255)`);
+      console.log('[migration] admins.manager_name ensured');
+    } catch (e) {
+      console.log('[migration] admins.manager_name migration failed:', e.message);
+    }
+
     // Migration: Add logo_at field
     await pool.query(`
       ALTER TABLE restaurants 

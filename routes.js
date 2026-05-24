@@ -169,7 +169,7 @@ router.post('/auth/admin', async (req, res) => {
     if (admin.is_active === false) return res.status(403).json({ error: 'Restaurant is not active' });
     const validPassword = await bcrypt.compare(password, admin.password_hash);
     if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
-    res.json({ id: admin.id, email: admin.email, role: 'ADMIN', restaurantId: admin.restaurant_id });
+    res.json({ id: admin.id, email: admin.email, role: 'ADMIN', restaurantId: admin.restaurant_id, managerName: admin.manager_name });
   } catch (error) {
     console.error('Admin login error:', error);
     res.status(500).json({ error: 'Server error' });
