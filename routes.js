@@ -288,7 +288,9 @@ router.put('/restaurants/:id/layout', async (req, res) => {
 router.get('/restaurants/:restaurantId/bookings', async (req, res) => {
   try {
     const { restaurantId } = req.params;
-    const result = await pool.query(`
+    const { date } = req.query; // YYYY-MM-DD format
+
+    let queryText = `
       SELECT 
         b.*,
         COALESCE(
@@ -300,9 +302,20 @@ router.get('/restaurants/:restaurantId/bookings', async (req, res) => {
           '[]'::json
         ) as "tableLabels"
       FROM bookings b 
-      WHERE b.restaurant_id = $1 
-      ORDER BY b.date_time DESC
-    `, [restaurantId]);
+      WHERE b.restaurant_id = $1
+    `;
+    const params = [restaurantId];
+
+    if (date) {
+      // When filtering by date, also always include PENDING bookings
+      // so admin dashboard never misses incoming requests regardless of date
+      queryText += ` AND (b.date_time::date = $2::date OR b.status = 'PENDING') `;
+      params.push(date);
+    }
+
+    queryText += ` ORDER BY b.date_time DESC `;
+
+    const result = await pool.query(queryText, params);
     res.json(result.rows);
   } catch (error) {
     console.error('Get bookings error:', error);
