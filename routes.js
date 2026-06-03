@@ -1120,4 +1120,51 @@ router.put('/guests/:phone', async (req, res) => {
   }
 });
 
+// CREATE LEAD
+router.post('/leads', async (req, res) => {
+  try {
+    const { name, phone, venue } = req.body;
+    
+    if (!name || !phone || !venue) {
+      return res.status(400).json({ error: 'Name, phone, and venue are required' });
+    }
+    
+    const result = await pool.query(
+      `INSERT INTO restaurant_leads (name, phone, venue) 
+       VALUES ($1, $2, $3) RETURNING id`,
+      [name, phone, venue]
+    );
+    
+    // Send email notification to owner if configured
+    const ownerMail = process.env.OWNER_MAIL?.replace('mailto:', '');
+    if (ownerMail && process.env.RESEND_API_KEY) {
+      try {
+        await resend.emails.send({
+          from: process.env.EMAIL_FROM || 'Brondau <onboarding@resend.dev>',
+          to: ownerMail,
+          subject: '🔥 Новый лид с лендинга Brondau!',
+          html: `
+            <h2>Поступила новая заявка на подключение:</h2>
+            <ul>
+              <li><strong>Имя:</strong> ${name}</li>
+              <li><strong>Телефон (WhatsApp):</strong> ${phone}</li>
+              <li><strong>Заведение/Город:</strong> ${venue}</li>
+            </ul>
+            <p>Свяжитесь с клиентом как можно скорее!</p>
+          `
+        });
+        console.log(`Lead notification email sent to ${ownerMail}`);
+      } catch (emailError) {
+        console.error('Failed to send lead notification email:', emailError);
+        // Don't fail the request if email fails
+      }
+    }
+    
+    res.json({ success: true, leadId: result.rows[0].id });
+  } catch (error) {
+    console.error('Create lead error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 export default router;
