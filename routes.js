@@ -1123,16 +1123,16 @@ router.put('/guests/:phone', async (req, res) => {
 // CREATE LEAD
 router.post('/leads', async (req, res) => {
   try {
-    const { name, phone, venue } = req.body;
+    const { name, phone, venue, promo } = req.body;
     
     if (!name || !phone || !venue) {
       return res.status(400).json({ error: 'Name, phone, and venue are required' });
     }
     
     const result = await pool.query(
-      `INSERT INTO restaurant_leads (name, phone, venue) 
-       VALUES ($1, $2, $3) RETURNING id`,
-      [name, phone, venue]
+      `INSERT INTO restaurant_leads (name, phone, venue, promo) 
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [name, phone, venue, promo || null]
     );
     
     // Send email notification to owner if configured
@@ -1149,6 +1149,7 @@ router.post('/leads', async (req, res) => {
               <li><strong>Имя:</strong> ${name}</li>
               <li><strong>Телефон (WhatsApp):</strong> ${phone}</li>
               <li><strong>Заведение/Город:</strong> ${venue}</li>
+              ${promo ? `<li><strong>Промокод:</strong> ${promo}</li>` : ''}
             </ul>
             <p>Свяжитесь с клиентом как можно скорее!</p>
           `
@@ -1163,6 +1164,107 @@ router.post('/leads', async (req, res) => {
     res.json({ success: true, leadId: result.rows[0].id });
   } catch (error) {
     console.error('Create lead error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// CREATE REFERAL LEAD
+router.post('/referal-leads', async (req, res) => {
+  try {
+    const { name, specialty, email, phone } = req.body;
+
+    if (!name || !specialty || !email || !phone) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    // Generate promo code: BRONDAU-[first 3 letters of name uppercase]-[random 4 digits]
+    const namePrefix = name.replace(/[^a-zA-Zа-яА-ЯёЁ]/g, '').slice(0, 3).toUpperCase();
+    const randomDigits = Math.floor(1000 + Math.random() * 9000);
+    let promoCode = `BRONDAU-${namePrefix}${randomDigits}`;
+
+    // Ensure uniqueness — retry if collision
+    let attempts = 0;
+    while (attempts < 5) {
+      try {
+        const result = await pool.query(
+          `INSERT INTO referal_leads (name, specialty, email, phone, promo_code)
+           VALUES ($1, $2, $3, $4, $5) RETURNING id, promo_code`,
+          [name, specialty, email, phone, promoCode]
+        );
+
+        // Send email with promo code
+        if (process.env.RESEND_API_KEY) {
+          try {
+            await resend.emails.send({
+              from: process.env.EMAIL_FROM || 'Brondau <onboarding@resend.dev>',
+              to: email,
+              subject: 'Ваш личный промокод Brondau создан!',
+              html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px; background: #f5efe6; border-radius: 16px;">
+                  <h1 style="color: #2c1f14; margin-bottom: 16px;">Привет, ${name}! 🎉</h1>
+                  <p style="color: #2c1f14; font-size: 16px; line-height: 1.6;">
+                    Твой уникальный промокод для приглашения ресторанов:
+                  </p>
+                  <div style="background: #2c1f14; color: #f5efe6; padding: 20px; border-radius: 12px; text-align: center; margin: 24px 0;">
+                    <span style="font-size: 32px; font-weight: bold; letter-spacing: 2px;">${promoCode}</span>
+                  </div>
+                  <p style="color: #2c1f14; font-size: 16px; line-height: 1.6;">
+                    Передай его управляющему или владельцу заведения. При регистрации они должны указать его, чтобы получить <strong>+1 месяц бесплатного доступа</strong>.
+                  </p>
+                  <p style="color: #2c1f14; font-size: 16px; line-height: 1.6;">
+                    Как только они пройдут 2 недели онбординга, мы свяжемся с тобой для выплаты. Удачи! 🚀
+                  </p>
+                  <hr style="border: none; border-top: 1px solid #d5b483; margin: 24px 0;" />
+                  <p style="color: #999; font-size: 12px;">© Brondau. Все права защищены.</p>
+                </div>
+              `
+            });
+            console.log(`Referal promo email sent to ${email}`);
+          } catch (emailError) {
+            console.error('Failed to send referal promo email:', emailError);
+          }
+        }
+
+        // Also notify owner
+        const ownerMail = process.env.OWNER_MAIL?.replace('mailto:', '');
+        if (ownerMail && process.env.RESEND_API_KEY) {
+          try {
+            await resend.emails.send({
+              from: process.env.EMAIL_FROM || 'Brondau <onboarding@resend.dev>',
+              to: ownerMail,
+              subject: '🤝 Новый реферальный партнер Brondau!',
+              html: `
+                <h2>Зарегистрирован новый реферальный партнер:</h2>
+                <ul>
+                  <li><strong>ФИО:</strong> ${name}</li>
+                  <li><strong>Специальность:</strong> ${specialty}</li>
+                  <li><strong>Email:</strong> ${email}</li>
+                  <li><strong>Телефон:</strong> ${phone}</li>
+                  <li><strong>Промокод:</strong> ${promoCode}</li>
+                </ul>
+              `
+            });
+          } catch (emailError) {
+            console.error('Failed to send owner notification:', emailError);
+          }
+        }
+
+        return res.json({ success: true, promoCode: result.rows[0].promo_code });
+      } catch (insertError) {
+        // If unique constraint violation on promo_code, retry with new code
+        if (insertError.code === '23505' && insertError.constraint?.includes('promo_code')) {
+          const newDigits = Math.floor(1000 + Math.random() * 9000);
+          promoCode = `BRONDAU-${namePrefix}${newDigits}`;
+          attempts++;
+          continue;
+        }
+        throw insertError;
+      }
+    }
+
+    res.status(500).json({ error: 'Could not generate unique promo code' });
+  } catch (error) {
+    console.error('Create referal lead error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
