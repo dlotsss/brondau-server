@@ -216,7 +216,7 @@ router.put('/restaurants/:id/layout', async (req, res) => {
     const {
       layout, floors, bookingRestriction, ageRestriction,
       photoUrl, logoUrl, address, city, adminWorks,
-      deposit, ageRestrictionKz, depositKz
+      deposit, ageRestrictionKz, depositKz, menu
     } = req.body;
     let columns = [];
     let params = [];
@@ -269,6 +269,10 @@ router.put('/restaurants/:id/layout', async (req, res) => {
     if (depositKz !== undefined) {
       columns.push(`deposit_kz = $${paramIndex++}`);
       params.push(depositKz);
+    }
+    if (menu !== undefined) {
+      columns.push(`menu = $${paramIndex++}`);
+      params.push(menu);
     }
 
     if (columns.length === 0) return res.status(400).json({ error: 'No fields to update' });
@@ -1265,6 +1269,84 @@ router.post('/referal-leads', async (req, res) => {
     res.status(500).json({ error: 'Could not generate unique promo code' });
   } catch (error) {
     console.error('Create referal lead error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============ MENU ============
+
+const MENU_SELECT_FIELDS = `
+  id,
+  restaurant_id AS "restaurantId",
+  dish_title AS "dishTitle",
+  photo_url AS "photoUrl",
+  price,
+  description,
+  category,
+  weight,
+  is_available AS "isAvailable",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt"
+`;
+
+router.get('/restaurants/:restaurantId/menu', async (req, res) => {
+  try {
+    const { restaurantId } = req.params;
+    const result = await pool.query(
+      `SELECT ${MENU_SELECT_FIELDS} FROM menu WHERE restaurant_id = $1 ORDER BY category, dish_title`,
+      [restaurantId]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get menu error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/restaurants/:restaurantId/menu', async (req, res) => {
+  try {
+    const { restaurantId } = req.params;
+    const { dishTitle, photoUrl, price, description, category, weight, isAvailable } = req.body;
+    const result = await pool.query(
+      `INSERT INTO menu (restaurant_id, dish_title, photo_url, price, description, category, weight, is_available)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING ${MENU_SELECT_FIELDS}`,
+      [restaurantId, dishTitle, photoUrl || null, price || 0, description || null, category || 'Разное', weight || null, isAvailable !== false]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Create menu item error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.put('/menu/:dishId', async (req, res) => {
+  try {
+    const { dishId } = req.params;
+    const { dishTitle, photoUrl, price, description, category, weight, isAvailable } = req.body;
+    const result = await pool.query(
+      `UPDATE menu
+       SET dish_title = $1, photo_url = $2, price = $3, description = $4, category = $5, weight = $6, is_available = $7, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $8
+       RETURNING ${MENU_SELECT_FIELDS}`,
+      [dishTitle, photoUrl, price, description, category, weight, isAvailable, dishId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Dish not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update menu item error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.delete('/menu/:dishId', async (req, res) => {
+  try {
+    const { dishId } = req.params;
+    const result = await pool.query(`DELETE FROM menu WHERE id = $1 RETURNING ${MENU_SELECT_FIELDS}`, [dishId]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Dish not found' });
+    res.json({ message: 'Dish deleted successfully', dish: result.rows[0] });
+  } catch (error) {
+    console.error('Delete menu item error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

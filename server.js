@@ -198,8 +198,33 @@ async function runMigrations() {
       ADD COLUMN IF NOT EXISTS logo_url TEXT
     `);
 
+    // Migration: Add menu column to restaurants
+    await pool.query(`
+      ALTER TABLE restaurants
+      ADD COLUMN IF NOT EXISTS menu BOOLEAN DEFAULT false
+    `);
+    console.log('[migration] restaurants.menu column ensured');
+
+    // Migration: Create menu table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS menu (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        dish_title TEXT NOT NULL,
+        photo_url TEXT,
+        price NUMERIC NOT NULL DEFAULT 0,
+        description TEXT,
+        category TEXT DEFAULT 'Разное',
+        weight TEXT,
+        is_available BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('[migration] menu table ensured');
+
   } catch (e) {
-    console.log('[migration] telegram_chat_id migration failed:', e.message);
+    console.log('[migration] telegram_chat_id or menu migration failed:', e.message);
   }
 }
 
