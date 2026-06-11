@@ -151,8 +151,20 @@ router.post('/auth/owner/restaurants', async (req, res) => {
 
 router.post('/auth/admin/restaurants', async (req, res) => {
   try {
-    const { email } = req.body;
-    const result = await pool.query(`SELECT r.id, r.name, r.with_map FROM admins a JOIN restaurants r ON a.restaurant_id = r.id WHERE a.email = $1 AND r.is_active = true`, [email]);
+    const { email, forAnalytics } = req.body;
+    let queryText = `
+      SELECT r.id, r.name, r.with_map 
+      FROM admins a 
+      JOIN restaurants r ON a.restaurant_id = r.id 
+      WHERE a.email = $1 AND r.is_active = true
+    `;
+    const params = [email];
+    
+    if (forAnalytics) {
+      queryText += ` AND r.analytics = true`;
+    }
+    
+    const result = await pool.query(queryText, params);
     res.json(result.rows);
   } catch (error) {
     console.error('Get admin restaurants error:', error);
@@ -162,11 +174,17 @@ router.post('/auth/admin/restaurants', async (req, res) => {
 
 router.post('/auth/admin', async (req, res) => {
   try {
-    const { email, password, restaurantId } = req.body;
-    const result = await pool.query('SELECT a.*, r.is_active FROM admins a JOIN restaurants r ON a.restaurant_id = r.id WHERE a.email = $1 AND a.restaurant_id = $2', [email, restaurantId]);
+    const { email, password, restaurantId, forAnalytics } = req.body;
+    const result = await pool.query(
+      'SELECT a.*, r.is_active, r.analytics FROM admins a JOIN restaurants r ON a.restaurant_id = r.id WHERE a.email = $1 AND a.restaurant_id = $2',
+      [email, restaurantId]
+    );
     if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
     const admin = result.rows[0];
     if (admin.is_active === false) return res.status(403).json({ error: 'Restaurant is not active' });
+    if (forAnalytics && admin.analytics === false) {
+      return res.status(403).json({ error: 'Аналитика для данного заведения отключена' });
+    }
     const validPassword = await bcrypt.compare(password, admin.password_hash);
     if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
     res.json({ id: admin.id, email: admin.email, role: 'ADMIN', restaurantId: admin.restaurant_id, managerName: admin.manager_name });
@@ -323,6 +341,41 @@ router.get('/restaurants/:restaurantId/bookings', async (req, res) => {
     res.json(result.rows);
   } catch (error) {
     console.error('Get bookings error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.get('/restaurants/:restaurantId/bookings-range', async (req, res) => {
+  try {
+    const { restaurantId } = req.params;
+    const { from, to } = req.query;
+
+    if (!from || !to) {
+      return res.status(400).json({ error: 'Both "from" and "to" parameters are required' });
+    }
+
+    const queryText = `
+      SELECT 
+        b.*,
+        COALESCE(
+          (SELECT json_agg(bt.table_id) FROM booking_tables bt WHERE bt.booking_id = b.id), 
+          '[]'::json
+        ) as "tableIds",
+        COALESCE(
+          (SELECT json_agg(bt.table_label) FROM booking_tables bt WHERE bt.booking_id = b.id), 
+          '[]'::json
+        ) as "tableLabels"
+      FROM bookings b 
+      WHERE b.restaurant_id = $1
+        AND b.date_time >= $2::timestamp
+        AND b.date_time <= $3::timestamp
+      ORDER BY b.date_time DESC
+    `;
+
+    const result = await pool.query(queryText, [restaurantId, from, to]);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get bookings range error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
