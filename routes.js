@@ -231,6 +231,7 @@ router.post('/restaurants', async (req, res) => {
 
 router.put('/restaurants/:id/layout', async (req, res) => {
   try {
+    const { id } = req.params;
     const {
       layout, floors, bookingRestriction, ageRestriction,
       photoUrl, logoUrl, address, city, adminWorks,
